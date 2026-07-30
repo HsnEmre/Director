@@ -1,0 +1,284 @@
+﻿<UserControl x:Class="Director.Views.ProductionWorkspaceView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Background="{StaticResource BrushBackground}" Margin="22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="6" />
+            <RowDefinition Height="190" MinHeight="120" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Style="{StaticResource CardBorderStyle}" Padding="18">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock Text="{Binding ProjectName, Mode=OneWay}" FontSize="24" FontWeight="Bold" Foreground="{StaticResource BrushText}" />
+                    <TextBlock Text="WanGP / Wan2GP sahne medya uretim calisma alani" Foreground="{StaticResource BrushMutedText}" Margin="0,6,0,0" />
+                    <TextBlock Text="{Binding ConnectionStatus, Mode=OneWay}" Foreground="{StaticResource BrushAccent}" Margin="0,6,0,0" TextWrapping="Wrap" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="MCP'yi Baslat" Command="{Binding TestConnectionCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,8,0" />
+                    <Button Content="Yeniden Baglan" Command="{Binding ReconnectCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,8,0" />
+                    <Button Content="Modelleri Yenile" Command="{Binding RefreshModelsCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,8,0" />
+                    <Button Content="WanGP Arayuzu" Command="{Binding OpenGuiCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,8,0" />
+                    <Button Content="Iptal" Command="{Binding CancelCommand}" Style="{StaticResource GhostButtonStyle}" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="1" Margin="0,16,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="310" />
+                <ColumnDefinition Width="14" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0" Style="{StaticResource CardBorderStyle}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Text="Sahneler" Style="{StaticResource SectionHeaderStyle}" />
+                    <ListBox Grid.Row="1"
+                             ItemsSource="{Binding Scenes, Mode=OneWay}"
+                             SelectedItem="{Binding SelectedScene, Mode=TwoWay}"
+                             Background="{StaticResource BrushInput}"
+                             BorderBrush="{StaticResource BrushBorder}"
+                             Foreground="{StaticResource BrushText}"
+                             Margin="0,12,0,0">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="4,6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="46" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="{Binding SceneNumber, Mode=OneWay, StringFormat={}{0:000}}" Foreground="{StaticResource BrushAccent}" FontWeight="Bold" />
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock Text="{Binding Title, Mode=OneWay}" Foreground="{StaticResource BrushText}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                        <TextBlock Foreground="{StaticResource BrushMutedText}" FontSize="12">
+                                            <Run Text="Gorsel: " />
+                                            <Run Text="{Binding ImageCount, Mode=OneWay}" />
+                                            <Run Text=" | Video: " />
+                                            <Run Text="{Binding VideoAssets.Count, Mode=OneWay}" />
+                                        </TextBlock>
+                                    </StackPanel>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </Border>
+
+            <TabControl Grid.Column="2" Background="{StaticResource BrushBackground}" BorderBrush="{StaticResource BrushBorder}" Foreground="{StaticResource BrushText}" SelectionChanged="OnWorkspaceTabSelectionChanged">
+                <TabItem Header="Gorsel Uretimi">
+                    <Grid Margin="0,12,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="14" />
+                            <ColumnDefinition Width="390" />
+                        </Grid.ColumnDefinitions>
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="14" />
+                                <RowDefinition Height="180" />
+                            </Grid.RowDefinitions>
+                            <Border Grid.Row="0" Style="{StaticResource CardBorderStyle}">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                    </Grid.RowDefinitions>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="Onizleme" Style="{StaticResource SectionHeaderStyle}" />
+                                        <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                            <Button Content="WanGP Outputs" Command="{Binding OpenWanGpOutputFolderCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,8,0" />
+                                            <Button Content="Director Images" Command="{Binding OpenDirectorImagesFolderCommand}" Style="{StaticResource GhostButtonStyle}" />
+                                        </StackPanel>
+                                    </Grid>
+                                    <Border Grid.Row="1" Background="{StaticResource BrushInput}" BorderBrush="{StaticResource BrushBorder}" BorderThickness="1" CornerRadius="8" Margin="0,12,0,0">
+                                        <Grid>
+                                            <Image Source="{Binding PreviewImageSource, Mode=OneWay}" Stretch="Uniform" Margin="12" Visibility="{Binding HasPreview, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                            <TextBlock Text="{Binding PreviewStatus, Mode=OneWay}" Foreground="{StaticResource BrushMutedText}" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" Visibility="{Binding HasPreview, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}" />
+                                        </Grid>
+                                    </Border>
+                                </Grid>
+                            </Border>
+                            <Border Grid.Row="2" Style="{StaticResource CardBorderStyle}" Padding="16">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Text="Gorsel Versiyonlari" Style="{StaticResource SectionHeaderStyle}" />
+                                    <ListBox Grid.Row="1" ItemsSource="{Binding Assets, Mode=OneWay}" SelectedItem="{Binding SelectedAsset, Mode=TwoWay}" Background="{StaticResource BrushInput}" BorderBrush="{StaticResource BrushBorder}" Foreground="{StaticResource BrushText}" Margin="0,8,0,0">
+                                        <ListBox.ItemsPanel>
+                                            <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                                        </ListBox.ItemsPanel>
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <StackPanel Width="150" Margin="4">
+                                                    <Border Background="{StaticResource BrushPanel}" BorderBrush="{StaticResource BrushBorder}" BorderThickness="1" CornerRadius="7" Height="90">
+                                                        <Image Source="{Binding ThumbnailPath, Mode=OneWay}" Stretch="UniformToFill" />
+                                                    </Border>
+                                                    <TextBlock Text="{Binding VersionNumber, Mode=OneWay, StringFormat=v{0}}" Foreground="{StaticResource BrushAccent}" FontWeight="SemiBold" />
+                                                    <TextBlock Text="{Binding ModelType, Mode=OneWay}" Foreground="{StaticResource BrushMutedText}" FontSize="11" TextTrimming="CharacterEllipsis" />
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
+                                </Grid>
+                            </Border>
+                        </Grid>
+                        <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto">
+                            <StackPanel>
+                                <TextBlock Text="Kurulu Gorsel Modelleri" Style="{StaticResource FieldLabelStyle}" />
+                                <ComboBox ItemsSource="{Binding InstalledModels, Mode=OneWay}" SelectedItem="{Binding SelectedModel, Mode=TwoWay}" DisplayMemberPath="DisplayText" />
+                                <TextBlock Text="{Binding SelectedModelDetails, Mode=OneWay}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" Margin="0,8,0,12" />
+                                <TextBlock Text="Cozunurluk" Style="{StaticResource FieldLabelStyle}" />
+                                <ComboBox ItemsSource="{Binding Resolutions, Mode=OneWay}" SelectedItem="{Binding SelectedResolution, Mode=TwoWay}" />
+                                <TextBlock Text="Inference Steps" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,7" />
+                                <TextBox Text="{Binding InferenceSteps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <CheckBox Content="Rastgele seed" IsChecked="{Binding RandomSeed, Mode=TwoWay}" />
+                                <TextBlock Text="Seed" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,7" />
+                                <TextBox Text="{Binding Seed, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding RandomSeed, Mode=OneWay, Converter={StaticResource InverseBooleanConverter}}" />
+                                <Button Content="Secili Sahneyi Uret" Command="{Binding GenerateSelectedCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="0,16,0,0" />
+                                <Button Content="Secili Versiyonu Kullan" Command="{Binding SelectAssetCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,8,0,0" />
+                                <Button Content="WanGP Ciktilarini Tara" Command="{Binding ScanWanGpOutputsCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,8,0,0" />
+                                <ListBox ItemsSource="{Binding WanGpOutputs, Mode=OneWay}" SelectedItem="{Binding SelectedWanGpOutput, Mode=TwoWay}" MaxHeight="140" Background="{StaticResource BrushInput}" BorderBrush="{StaticResource BrushBorder}" Foreground="{StaticResource BrushText}" Margin="0,8,0,8" />
+                                <Button Content="Ciktiyi Ice Aktar" Command="{Binding ImportOutputCommand}" Style="{StaticResource SecondaryButtonStyle}" />
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="Video Uretimi">
+                    <Grid Margin="0,12,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="14" />
+                            <ColumnDefinition Width="420" />
+                        </Grid.ColumnDefinitions>
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="14" />
+                                <RowDefinition Height="170" />
+                            </Grid.RowDefinitions>
+                            <Border Grid.Row="0" Style="{StaticResource CardBorderStyle}" Padding="12" Margin="0,0,0,12">
+                                <TextBlock Text="{Binding VideoStatus, Mode=OneWay}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" />
+                            </Border>
+                            <Border Grid.Row="1" Style="{StaticResource CardBorderStyle}">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Text="Video Onizleme" Style="{StaticResource SectionHeaderStyle}" />
+                                    <MediaElement Grid.Row="1" Source="{Binding VideoPreviewSource, Mode=OneWay}" LoadedBehavior="Manual" UnloadedBehavior="Stop" Stretch="Uniform" Margin="0,12,0,0" />
+                                </Grid>
+                            </Border>
+                            <Border Grid.Row="3" Style="{StaticResource CardBorderStyle}" Padding="16">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Text="Video Versiyonlari" Style="{StaticResource SectionHeaderStyle}" />
+                                    <ListBox Grid.Row="1" ItemsSource="{Binding VideoAssets, Mode=OneWay}" SelectedItem="{Binding SelectedVideoAsset, Mode=TwoWay}" Background="{StaticResource BrushInput}" BorderBrush="{StaticResource BrushBorder}" Foreground="{StaticResource BrushText}" Margin="0,8,0,0">
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <StackPanel Margin="4">
+                                                    <TextBlock Text="{Binding VersionNumber, Mode=OneWay, StringFormat=v{0}}" Foreground="{StaticResource BrushAccent}" FontWeight="SemiBold" />
+                                                    <TextBlock Text="{Binding ModelType, Mode=OneWay}" Foreground="{StaticResource BrushMutedText}" FontSize="11" />
+                                                    <TextBlock Text="{Binding DurationSeconds, Mode=OneWay, StringFormat={}{0:0.0} sn}" Foreground="{StaticResource BrushMutedText}" FontSize="11" />
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
+                                </Grid>
+                            </Border>
+                        </Grid>
+                        <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto">
+                            <StackPanel>
+                                <TextBlock Text="Qwen PreparedVideoPrompt" Style="{StaticResource FieldLabelStyle}" />
+                                <TextBox Text="{Binding PreparedVideoPrompt, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="120" />
+                                <TextBlock Text="Video Negative Prompt" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,7" />
+                                <TextBox Text="{Binding PreparedVideoNegativePrompt, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" />
+                                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                    <Button Content="Qwen ile Hazirla" Command="{Binding PrepareVideoPromptCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,8,0" />
+                                    <Button Content="Sahne Promptuna Don" Command="{Binding ResetPreparedVideoPromptCommand}" Style="{StaticResource GhostButtonStyle}" />
+                                </StackPanel>
+                                <Button Content="Sahne Video Promptunu Guncelle" Command="{Binding UpdateSceneVideoPromptCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,8,0,16" />
+
+                                <TextBlock Text="Kurulu Video Modelleri" Style="{StaticResource FieldLabelStyle}" />
+                                <ComboBox ItemsSource="{Binding InstalledVideoModels, Mode=OneWay}" SelectedItem="{Binding SelectedVideoModel, Mode=TwoWay}" DisplayMemberPath="DisplayText" />
+                                <TextBlock Text="{Binding SelectedVideoModelDetails, Mode=OneWay}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" Margin="0,8,0,12" />
+                                <TextBlock Text="Model Yapilandirmasi" Style="{StaticResource FieldLabelStyle}" />
+                                <ComboBox ItemsSource="{Binding VideoConfigurations, Mode=OneWay}" SelectedItem="{Binding SelectedVideoConfiguration, Mode=TwoWay}" DisplayMemberPath="DisplayText" />
+                                <Button Content="Video Modellerini Yenile" Command="{Binding RefreshVideoModelsCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,8,0,12" />
+                                <TextBlock Text="Cozunurluk" Style="{StaticResource FieldLabelStyle}" />
+                                <ComboBox ItemsSource="{Binding Resolutions, Mode=OneWay}" SelectedItem="{Binding SelectedVideoResolution, Mode=TwoWay}" />
+                                <TextBlock Text="Inference Steps" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,7" />
+                                <TextBox Text="{Binding VideoInferenceSteps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <CheckBox Content="Rastgele seed" IsChecked="{Binding VideoRandomSeed, Mode=TwoWay}" />
+                                <TextBlock Text="Seed" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,7" />
+                                <TextBox Text="{Binding VideoSeed, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding VideoRandomSeed, Mode=OneWay, Converter={StaticResource InverseBooleanConverter}}" />
+                                <Button Content="Video Uret" Command="{Binding GenerateVideoCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="0,16,0,0" />
+                                <Button Content="Secili Video Yap" Command="{Binding SelectVideoAssetCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,8,0,0" />
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Grid>
+                </TabItem>
+            </TabControl>
+        </Grid>
+
+        <GridSplitter Grid.Row="2" Height="6" HorizontalAlignment="Stretch" Background="{StaticResource BrushBorder}" />
+
+        <Border Grid.Row="3" Style="{StaticResource CardBorderStyle}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Kalici Canli Log" Style="{StaticResource SectionHeaderStyle}" />
+                    <Button Grid.Column="1" Content="Loglari Goster/Gizle" Command="{Binding ToggleLogsCommand}" Style="{StaticResource GhostButtonStyle}" />
+                </Grid>
+                <ListBox Grid.Row="1" ItemsSource="{Binding Logs, Mode=OneWay}" Background="{StaticResource BrushInput}" BorderBrush="{StaticResource BrushBorder}" Foreground="{StaticResource BrushText}" Margin="0,12,0,0" Visibility="{Binding ShowLogs, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock TextWrapping="Wrap" Margin="4,2">
+                                <Run Text="{Binding Timestamp, Mode=OneWay, StringFormat={}{0:HH:mm:ss}}" />
+                                <Run Text=" | " />
+                                <Run Text="{Binding Level, Mode=OneWay}" />
+                                <Run Text=" | " />
+                                <Run Text="{Binding Source, Mode=OneWay}" />
+                                <Run Text=" | " />
+                                <Run Text="{Binding Phase, Mode=OneWay}" FontWeight="SemiBold" />
+                                <Run Text=" | " />
+                                <Run Text="{Binding Message, Mode=OneWay}" />
+                            </TextBlock>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>
+

@@ -1,0 +1,170 @@
+<UserControl x:Class="Director.Views.StoryGenerationView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Background="{StaticResource BrushBackground}" Margin="22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Style="{StaticResource CardBorderStyle}" Padding="18">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock Text="{Binding ProjectName}" FontSize="24" FontWeight="Bold" Foreground="{StaticResource BrushText}" />
+                    <TextBlock Text="{Binding SubjectPreview}" Margin="0,6,0,0" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" MaxHeight="44" />
+                    <TextBlock Text="{Binding ProjectSummary}" Margin="0,6,0,0" Foreground="{StaticResource BrushAccent}" />
+                    <TextBlock Text="{Binding ModelName, StringFormat=Model: {0}}" Margin="0,4,0,0" Foreground="{StaticResource BrushMutedText}" />
+                </StackPanel>
+                <Border Grid.Column="1" Style="{StaticResource InfoCardStyle}" MinWidth="300">
+                    <TextBlock Text="{Binding OllamaStatus}" Foreground="{StaticResource BrushText}" TextWrapping="Wrap" />
+                </Border>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="1" Style="{StaticResource CardBorderStyle}" Padding="18" Margin="0,16,0,0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock Text="{Binding Phase}" FontSize="16" FontWeight="SemiBold" Foreground="{StaticResource BrushText}" />
+                    <TextBlock Text="{Binding ProgressMessage}" Margin="0,4,0,0" Foreground="{StaticResource BrushMutedText}" />
+                    <Grid Margin="0,12,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <ProgressBar Height="8" Minimum="0" Maximum="100" Value="{Binding Percentage, Mode=OneWay}" />
+                        <TextBlock Grid.Column="1" Text="{Binding Percentage, Mode=OneWay, StringFormat={}{0:0.0}%}" Margin="12,0,0,0" Foreground="{StaticResource BrushMutedText}" />
+                    </Grid>
+                    <TextBlock Margin="0,6,0,0" Foreground="{StaticResource BrushMutedText}">
+                        <Run Text="Tamamlanan: " />
+                        <Run Text="{Binding CompletedItems, Mode=OneWay}" />
+                        <Run Text="/" />
+                        <Run Text="{Binding TotalItems, Mode=OneWay}" />
+                        <Run Text="   Geçen süre: " />
+                        <Run Text="{Binding ElapsedTimeText, Mode=OneWay}" />
+                    </TextBlock>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="Ollama Bağlantısını Test Et" Command="{Binding TestOllamaCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,10,0" />
+                    <Button Content="Hikaye ve Sahne Planını Oluştur" Command="{Binding GenerateStoryCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,10,0" />
+                    <Button Content="Görsel Üretimine Geç" Command="{Binding GoToProductionCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,10,0" />
+                    <Button Content="İşlemi İptal Et" Command="{Binding CancelCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,10,0" />
+                    <Button Content="Proje Ayarlarına Dön" Command="{Binding BackCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,10,0" />
+                    <Button Content="Projelerim" Command="{Binding ProjectHistoryCommand}" Style="{StaticResource GhostButtonStyle}" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="2" Margin="0,16,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="360" />
+                <ColumnDefinition Width="18" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="18" />
+                <ColumnDefinition Width="360" />
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0" Style="{StaticResource CardBorderStyle}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <TextBlock Text="Hikaye Sonucu" Style="{StaticResource SectionHeaderStyle}" />
+                        <TextBlock Text="{Binding StoryTitle}" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource BrushAccent}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding Logline}" Margin="0,12,0,0" Foreground="{StaticResource BrushText}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding Synopsis}" Margin="0,12,0,0" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" />
+                        <TextBlock Text="Dünya" Style="{StaticResource FieldLabelStyle}" Margin="0,18,0,6" />
+                        <TextBlock Text="{Binding WorldDescription}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" />
+                        <TextBlock Text="Karakterler" Style="{StaticResource FieldLabelStyle}" Margin="0,18,0,6" />
+                        <TextBlock Text="{Binding CharactersSummary}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+
+            <Border Grid.Column="2" Style="{StaticResource CardBorderStyle}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Text="Sahne Listesi - teknik promptlar İngilizce" Style="{StaticResource SectionHeaderStyle}" />
+                    <DataGrid Grid.Row="1" Margin="0,12,0,0" ItemsSource="{Binding Scenes}" SelectedItem="{Binding SelectedScene, Mode=TwoWay}" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" Background="{StaticResource BrushPanel}" Foreground="{StaticResource BrushText}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="No" Binding="{Binding SceneNumber}" Width="44" />
+                            <DataGridTextColumn Header="Başlık" Binding="{Binding Title}" Width="130" />
+                            <DataGridTextColumn Header="Süre" Binding="{Binding DurationSeconds}" Width="56" />
+                            <DataGridTextColumn Header="Story Beat" Binding="{Binding StoryBeat}" Width="150" />
+                            <DataGridTextColumn Header="Image Prompt" Binding="{Binding ImagePrompt}" Width="220" />
+                            <DataGridTextColumn Header="Video Prompt" Binding="{Binding VideoPrompt}" Width="220" />
+                            <DataGridTextColumn Header="Narration" Binding="{Binding NarrationText}" Width="170" />
+                            <DataGridTextColumn Header="Durum" Binding="{Binding Status}" Width="100" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </Border>
+
+            <Grid Grid.Column="4">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="16" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Border Grid.Row="0" Style="{StaticResource CardBorderStyle}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="Canlı AI İşlem Günlüğü" Style="{StaticResource SectionHeaderStyle}" />
+                        <ListBox Grid.Row="1" ItemsSource="{Binding GenerationLogs}" Background="{StaticResource BrushInput}" BorderBrush="{StaticResource BrushBorder}" Foreground="{StaticResource BrushText}">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock TextWrapping="Wrap" Margin="4,2">
+                                        <Run Text="{Binding Timestamp, StringFormat={}{0:HH:mm:ss}}" />
+                                        <Run Text=" [" />
+                                        <Run Text="{Binding Level}" />
+                                        <Run Text="] " />
+                                        <Run Text="{Binding Phase}" FontWeight="SemiBold" />
+                                        <Run Text=" - " />
+                                        <Run Text="{Binding Message}" />
+                                    </TextBlock>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0">
+                            <Button Content="Temizle" Command="{Binding ClearLogsCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,8,0" />
+                            <Button Content="Log Klasörünü Aç" Command="{Binding OpenLogFolderCommand}" Style="{StaticResource SecondaryButtonStyle}" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <Border Grid.Row="2" Style="{StaticResource CardBorderStyle}">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
+                            <TextBlock Text="Sahne Detayı" Style="{StaticResource SectionHeaderStyle}" />
+                            <TextBlock Text="Image Prompt" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBlock Text="{Binding SelectedScene.ImagePrompt}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" />
+                            <TextBlock Text="Video Prompt" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,6" />
+                            <TextBlock Text="{Binding SelectedScene.VideoPrompt}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" />
+                            <TextBlock Text="Negative Prompts" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,6" />
+                            <TextBlock Text="{Binding SelectedScene.ImageNegativePrompt}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding SelectedScene.VideoNegativePrompt}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" />
+                            <TextBlock Text="Narration" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,6" />
+                            <TextBlock Text="{Binding SelectedScene.NarrationText}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" />
+                            <TextBlock Text="Continuity / Checklist" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,6" />
+                            <TextBlock Text="{Binding SelectedScene.ContinuityFromPreviousScene}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding SelectedScene.ValidationChecklistJson}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ScrollViewer>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</UserControl>

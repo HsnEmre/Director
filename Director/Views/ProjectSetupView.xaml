@@ -1,0 +1,140 @@
+<UserControl x:Class="Director.Views.ProjectSetupView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Background="{StaticResource BrushBackground}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <ScrollViewer Grid.Row="0"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+            <Grid Margin="28">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="24" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0" Style="{StaticResource CardBorderStyle}">
+                    <StackPanel>
+                        <TextBlock Text="Hikaye ve Karakterler" Style="{StaticResource SectionHeaderStyle}" />
+                        <TextBlock Text="Filmin yaratıcı omurgasını ve karakter kimliğini burada tanımlayın." Style="{StaticResource SectionSubtitleStyle}" />
+
+                        <TextBlock Text="Proje Adı" Style="{StaticResource FieldLabelStyle}" />
+                        <TextBox Text="{Binding ProjectName, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" />
+                        <TextBlock Text="{Binding ProjectNameError}" Style="{StaticResource ValidationTextStyle}" Visibility="{Binding ProjectNameError, Converter={StaticResource EmptyStringToVisibilityConverter}}" />
+
+                        <TextBlock Text="Film / Video Konusu" Style="{StaticResource FieldLabelStyle}" Margin="0,18,0,7" />
+                        <TextBox Text="{Binding Subject, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" Style="{StaticResource MultilineTextBoxStyle}" />
+                        <TextBlock Text="{Binding SubjectError}" Style="{StaticResource ValidationTextStyle}" Visibility="{Binding SubjectError, Converter={StaticResource EmptyStringToVisibilityConverter}}" />
+
+                        <TextBlock Text="Ana Karakterler" Style="{StaticResource FieldLabelStyle}" Margin="0,18,0,7" />
+                        <TextBox Text="{Binding MainCharacterDescription, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MultilineTextBoxStyle}" />
+
+                        <TextBlock Text="Ek Talimatlar" Style="{StaticResource FieldLabelStyle}" Margin="0,18,0,7" />
+                        <TextBox Text="{Binding AdditionalInstructions, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource MultilineTextBoxStyle}" />
+                    </StackPanel>
+                </Border>
+
+                <Border Grid.Column="2" Style="{StaticResource CardBorderStyle}">
+                    <StackPanel>
+                        <TextBlock Text="Üretim Parametreleri" Style="{StaticResource SectionHeaderStyle}" />
+                        <TextBlock Text="Süre, format, dil ve görsel yaklaşımı netleştirerek üretim planını çıkarın." Style="{StaticResource SectionSubtitleStyle}" />
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="16" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="Toplam Süre (dakika)" Style="{StaticResource FieldLabelStyle}" />
+                                <TextBox Text="{Binding TotalDurationMinutes, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" />
+                                <TextBlock Text="{Binding TotalDurationMinutesError}" Style="{StaticResource ValidationTextStyle}" Visibility="{Binding TotalDurationMinutesError, Converter={StaticResource EmptyStringToVisibilityConverter}}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="Klip Süresi (saniye)" Style="{StaticResource FieldLabelStyle}" />
+                                <ComboBox ItemsSource="{Binding ClipDurationOptions}" SelectedItem="{Binding ClipDurationSeconds, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" />
+                                <TextBlock Text="{Binding ClipDurationSecondsError}" Style="{StaticResource ValidationTextStyle}" Visibility="{Binding ClipDurationSecondsError, Converter={StaticResource EmptyStringToVisibilityConverter}}" />
+                            </StackPanel>
+                        </Grid>
+
+                        <Border Style="{StaticResource InfoCardStyle}" Margin="0,16,0,0" BorderBrush="{StaticResource BrushAccent}">
+                            <StackPanel>
+                                <TextBlock Text="Hesaplanan Klip Sayısı" Foreground="{StaticResource BrushMutedText}" />
+                                <TextBlock Text="{Binding CalculatedClipCount}" FontSize="34" FontWeight="Bold" Foreground="{StaticResource BrushAccent}" />
+                                <TextBlock Text="{Binding CalculatedOutputDurationText}" Foreground="{StaticResource BrushText}" />
+                                <TextBlock Text="{Binding DurationWarningText}" Margin="0,8,0,0" Foreground="{StaticResource BrushWarning}" TextWrapping="Wrap" Visibility="{Binding DurationWarningText, Converter={StaticResource EmptyStringToVisibilityConverter}}" />
+                            </StackPanel>
+                        </Border>
+
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="16" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="Dil" Style="{StaticResource FieldLabelStyle}" />
+                                <ComboBox ItemsSource="{Binding LanguageOptions}" SelectedItem="{Binding Language, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="Hedef Kitle" Style="{StaticResource FieldLabelStyle}" />
+                                <ComboBox ItemsSource="{Binding TargetAudienceOptions}" SelectedItem="{Binding TargetAudience, UpdateSourceTrigger=PropertyChanged}" />
+                            </StackPanel>
+                        </Grid>
+
+                        <TextBlock Text="Hikaye Türü" Style="{StaticResource FieldLabelStyle}" Margin="0,18,0,7" />
+                        <ComboBox ItemsSource="{Binding StoryGenreOptions}" SelectedItem="{Binding StoryGenre, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" />
+                        <TextBlock Text="{Binding StoryGenreError}" Style="{StaticResource ValidationTextStyle}" Visibility="{Binding StoryGenreError, Converter={StaticResource EmptyStringToVisibilityConverter}}" />
+
+                        <TextBlock Text="Görsel Stil" Style="{StaticResource FieldLabelStyle}" Margin="0,18,0,7" />
+                        <ComboBox ItemsSource="{Binding VisualStyleOptions}" Text="{Binding VisualStyle, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" IsEditable="True" />
+                        <TextBlock Text="{Binding VisualStyleError}" Style="{StaticResource ValidationTextStyle}" Visibility="{Binding VisualStyleError, Converter={StaticResource EmptyStringToVisibilityConverter}}" />
+
+                        <TextBlock Text="Video Stili" Style="{StaticResource FieldLabelStyle}" Margin="0,18,0,7" />
+                        <ComboBox ItemsSource="{Binding VideoStyleOptions}" Text="{Binding VideoStyle, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" IsEditable="True" />
+                        <TextBlock Text="{Binding VideoStyleError}" Style="{StaticResource ValidationTextStyle}" Visibility="{Binding VideoStyleError, Converter={StaticResource EmptyStringToVisibilityConverter}}" />
+
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="16" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="En-Boy Oranı" Style="{StaticResource FieldLabelStyle}" />
+                                <ComboBox ItemsSource="{Binding AspectRatioOptions}" SelectedItem="{Binding AspectRatio, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="Çözünürlük" Style="{StaticResource FieldLabelStyle}" />
+                                <ComboBox ItemsSource="{Binding ResolutionOptions}" SelectedItem="{Binding Resolution, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" />
+                            </StackPanel>
+                        </Grid>
+
+                        <CheckBox Content="Anlatıcı Kullan" IsChecked="{Binding UseNarrator, UpdateSourceTrigger=PropertyChanged}" Margin="0,18,0,0" />
+                        <TextBlock Text="Anlatıcı Tonu" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,7" />
+                        <ComboBox ItemsSource="{Binding NarratorToneOptions}" Text="{Binding NarratorTone, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" IsEditable="True" IsEnabled="{Binding UseNarrator}" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </ScrollViewer>
+
+        <Border Grid.Row="1" Background="{StaticResource BrushPanel}" BorderBrush="{StaticResource BrushBorder}" BorderThickness="0,1,0,0" Padding="28,14">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource BrushMutedText}" VerticalAlignment="Center" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button Content="Formu Temizle" Command="{Binding ClearFormCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,10,0" />
+                    <Button Content="Taslak Kaydet" Command="{Binding SaveDraftCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,10,0" />
+                    <Button Content="Hikayeyi Hazırlamaya Devam Et" Command="{Binding ContinueCommand}" Style="{StaticResource PrimaryButtonStyle}" />
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>
