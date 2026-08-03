@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Windows;
+using System.Windows.Threading;
 using Director.Enums;
 using Director.Services.Interfaces;
 using Director.WanGp;
@@ -9,7 +10,10 @@ namespace Director.Services;
 public sealed class ApplicationActivityCenter : IApplicationActivityCenter
 {
     private const int MaxLogs = 1000;
+    private const int MaxPendingLogs = 1000;
     private readonly object _lock = new();
+    private readonly Queue<ProductionLogEntry> _pendingLogs = new();
+    private int _drainScheduled;
 
     public ApplicationActivitySnapshot Snapshot { get; } = new();
     public ObservableCollection<ProductionLogEntry> Logs { get; } = new();
@@ -79,36 +83,41 @@ public sealed class ApplicationActivityCenter : IApplicationActivityCenter
             return;
         }
 
-        void Add()
+        var entry = new ProductionLogEntry
         {
-            lock (_lock)
-            {
-                Logs.Add(new ProductionLogEntry
-                {
-                    Timestamp = DateTime.Now,
-                    Phase = phase,
-                    Source = MapSource(phase),
-                    Message = message,
-                    Level = level
-                });
-
-                while (Logs.Count > MaxLogs)
-                {
-                    Logs.RemoveAt(0);
-                }
-            }
-
-            RaiseChanged();
-        }
+            Timestamp = DateTime.Now,
+            Phase = phase,
+            Source = MapSource(phase),
+            Message = message,
+            Level = level
+        };
 
         var dispatcher = Application.Current?.Dispatcher;
         if (dispatcher is not null && !dispatcher.CheckAccess())
         {
-            dispatcher.Invoke(Add);
+            EnqueueLog(entry);
+            ScheduleDrain(dispatcher);
             return;
         }
 
-        Add();
+        AddEntry(entry);
+    }
+
+    public void ClearLogs()
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is not null && !dispatcher.CheckAccess())
+        {
+            lock (_lock)
+            {
+                _pendingLogs.Clear();
+            }
+
+            ScheduleUiWork(dispatcher, ClearLogsOnCurrentThread);
+            return;
+        }
+
+        ClearLogsOnCurrentThread();
     }
 
     public void SetModelDiscoveryStatus(string status)
@@ -127,7 +136,131 @@ public sealed class ApplicationActivityCenter : IApplicationActivityCenter
         RaiseChanged();
     }
 
-    private void RaiseChanged() => Changed?.Invoke(this, EventArgs.Empty);
+    private void EnqueueLog(ProductionLogEntry entry)
+    {
+        lock (_lock)
+        {
+            _pendingLogs.Enqueue(entry);
+            while (_pendingLogs.Count > MaxPendingLogs)
+            {
+                _pendingLogs.Dequeue();
+            }
+        }
+    }
+
+    private void ScheduleDrain(Dispatcher dispatcher)
+    {
+        if (Interlocked.Exchange(ref _drainScheduled, 1) == 1)
+        {
+            return;
+        }
+
+        if (!ScheduleUiWork(dispatcher, DrainPendingLogs))
+        {
+            Interlocked.Exchange(ref _drainScheduled, 0);
+        }
+    }
+
+    private bool ScheduleUiWork(Dispatcher dispatcher, Action action)
+    {
+        try
+        {
+            dispatcher.BeginInvoke(action, DispatcherPriority.Background);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void DrainPendingLogs()
+    {
+        try
+        {
+            while (TryDequeue(out var entry))
+            {
+                AddEntry(entry);
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _drainScheduled, 0);
+        }
+
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is not null && HasPendingLogs())
+        {
+            ScheduleDrain(dispatcher);
+        }
+    }
+
+    private bool TryDequeue(out ProductionLogEntry entry)
+    {
+        lock (_lock)
+        {
+            if (_pendingLogs.Count > 0)
+            {
+                entry = _pendingLogs.Dequeue();
+                return true;
+            }
+        }
+
+        entry = default!;
+        return false;
+    }
+
+    private bool HasPendingLogs()
+    {
+        lock (_lock)
+        {
+            return _pendingLogs.Count > 0;
+        }
+    }
+
+    private void AddEntry(ProductionLogEntry entry)
+    {
+        lock (_lock)
+        {
+            Logs.Add(entry);
+            while (Logs.Count > MaxLogs)
+            {
+                Logs.RemoveAt(0);
+            }
+        }
+
+        RaiseChanged();
+    }
+
+    private void ClearLogsOnCurrentThread()
+    {
+        lock (_lock)
+        {
+            Logs.Clear();
+        }
+
+        RaiseChanged();
+    }
+
+    private void RaiseChanged()
+    {
+        var handlers = Changed;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (EventHandler handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                handler(this, EventArgs.Empty);
+            }
+            catch
+            {
+            }
+        }
+    }
 
     private static string MapSource(string phase)
     {

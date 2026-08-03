@@ -186,7 +186,7 @@
                                         <RowDefinition Height="*" />
                                     </Grid.RowDefinitions>
                                     <TextBlock Text="Video Onizleme" Style="{StaticResource SectionHeaderStyle}" />
-                                    <MediaElement Grid.Row="1" Source="{Binding VideoPreviewSource, Mode=OneWay}" LoadedBehavior="Manual" UnloadedBehavior="Stop" Stretch="Uniform" Margin="0,12,0,0" />
+                                    <MediaElement x:Name="VideoPreviewElement" Grid.Row="1" Source="{Binding PreviewVideoUri, Mode=OneWay}" LoadedBehavior="Manual" UnloadedBehavior="Stop" Stretch="Uniform" ScrubbingEnabled="True" MediaOpened="OnVideoMediaOpened" MediaEnded="OnVideoMediaEnded" MediaFailed="OnVideoMediaFailed" Margin="0,12,0,0" />
                                 </Grid>
                             </Border>
                             <Border Grid.Row="3" Style="{StaticResource CardBorderStyle}" Padding="16">
@@ -221,6 +221,7 @@
                                     <Button Content="Sahne Promptuna Don" Command="{Binding ResetPreparedVideoPromptCommand}" Style="{StaticResource GhostButtonStyle}" />
                                 </StackPanel>
                                 <Button Content="Sahne Video Promptunu Guncelle" Command="{Binding UpdateSceneVideoPromptCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,8,0,16" />
+                                <TextBlock Text="{Binding VideoReferenceImageDetails, Mode=OneWay}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" Margin="0,0,0,16" />
 
                                 <TextBlock Text="Kurulu Video Modelleri" Style="{StaticResource FieldLabelStyle}" />
                                 <ComboBox ItemsSource="{Binding InstalledVideoModels, Mode=OneWay}" SelectedItem="{Binding SelectedVideoModel, Mode=TwoWay}" DisplayMemberPath="DisplayText" />
@@ -228,6 +229,8 @@
                                 <TextBlock Text="Model Yapilandirmasi" Style="{StaticResource FieldLabelStyle}" />
                                 <ComboBox ItemsSource="{Binding VideoConfigurations, Mode=OneWay}" SelectedItem="{Binding SelectedVideoConfiguration, Mode=TwoWay}" DisplayMemberPath="DisplayText" />
                                 <Button Content="Video Modellerini Yenile" Command="{Binding RefreshVideoModelsCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,8,0,12" />
+                                <TextBlock Text="{Binding VideoDialogueSourceDetails, Mode=OneWay}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                                <TextBlock Text="{Binding PreparedPromptChecks, Mode=OneWay}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" Margin="0,0,0,12" />
                                 <TextBlock Text="Cozunurluk" Style="{StaticResource FieldLabelStyle}" />
                                 <ComboBox ItemsSource="{Binding Resolutions, Mode=OneWay}" SelectedItem="{Binding SelectedVideoResolution, Mode=TwoWay}" />
                                 <TextBlock Text="Inference Steps" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,7" />
@@ -236,7 +239,90 @@
                                 <TextBlock Text="Seed" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,7" />
                                 <TextBox Text="{Binding VideoSeed, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding VideoRandomSeed, Mode=OneWay, Converter={StaticResource InverseBooleanConverter}}" />
                                 <Button Content="Video Uret" Command="{Binding GenerateVideoCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="0,16,0,0" />
+                                <Button Content="Smoke Sonucunu Onayla" Command="{Binding ApproveLtxNativeSmokeCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,8,0,0" />
+                                <Button Content="5 Dakikalik Testi Baslat" Command="{Binding GenerateFiveMinuteLtxDialogueTestCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,8,0,0" />
                                 <Button Content="Secili Video Yap" Command="{Binding SelectVideoAssetCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,8,0,0" />
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Grid>
+                </TabItem>
+                <TabItem Header="Konusma Uretimi Deneysel">
+                    <Grid Margin="0,12,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="300" />
+                            <ColumnDefinition Width="14" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="14" />
+                            <ColumnDefinition Width="360" />
+                        </Grid.ColumnDefinitions>
+
+                        <Border Grid.Column="0" Style="{StaticResource CardBorderStyle}" Padding="14">
+                            <StackPanel>
+                                <TextBlock Text="Deneysel KugelAudio" Style="{StaticResource SectionHeaderStyle}" />
+                                <TextBlock Text="Ana video akisi DialogueJson dolu sahnelerde LTX native konusmali video kullanir. Bu sekme alternatif TTS denemeleri icindir." Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" Margin="0,10,0,14" />
+                                <TextBlock Text="Sahne Konusma Durumu" Style="{StaticResource FieldLabelStyle}" />
+                                <TextBlock Text="{Binding SelectedSceneDisplay, Mode=OneWay}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" Margin="0,10,0,14" />
+                                <TextBlock Text="{Binding Audio.Status, Mode=OneWay}" Foreground="{StaticResource BrushAccent}" TextWrapping="Wrap" />
+                                <Button Content="KugelAudio Dogrula" Command="{Binding Audio.RefreshAudioModelCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,16,0,0" />
+                                <Button Content="Konusma Planini Hazirla" Command="{Binding Audio.PrepareSpeechPlanCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="0,8,0,0" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Grid.Column="2" Style="{StaticResource CardBorderStyle}" Padding="14">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                    <RowDefinition Height="130" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="Konusma Timeline" Style="{StaticResource SectionHeaderStyle}" />
+                                <ListBox Grid.Row="1"
+                                         ItemsSource="{Binding Audio.Segments, Mode=OneWay}"
+                                         SelectedValue="{Binding Audio.SelectedSegmentId, Mode=TwoWay}"
+                                         SelectedValuePath="Id"
+                                         Background="{StaticResource BrushInput}"
+                                         BorderBrush="{StaticResource BrushBorder}"
+                                         Foreground="{StaticResource BrushText}"
+                                         Margin="0,10,0,12">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="4,6">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="90" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="90" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="{Binding SpeakerKey, Mode=OneWay}" Foreground="{StaticResource BrushAccent}" FontWeight="SemiBold" />
+                                                <StackPanel Grid.Column="1">
+                                                    <TextBlock Text="{Binding SourceText, Mode=OneWay}" Foreground="{StaticResource BrushText}" TextWrapping="Wrap" />
+                                                    <TextBlock Text="{Binding SpokenText, Mode=OneWay}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" FontSize="11" />
+                                                    <TextBlock Text="{Binding Emotion, Mode=OneWay}" Foreground="{StaticResource BrushAccent}" FontSize="11" />
+                                                    <TextBlock Text="{Binding TextHash, Mode=OneWay, StringFormat=Metin Hash: {0}}" Foreground="{StaticResource BrushMutedText}" FontSize="11" />
+                                                </StackPanel>
+                                                <TextBlock Grid.Column="2" Text="{Binding TargetDurationSeconds, Mode=OneWay, StringFormat={}{0:0.0} sn}" Foreground="{StaticResource BrushMutedText}" HorizontalAlignment="Right" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                                <Border Grid.Row="2" Background="{StaticResource BrushInput}" BorderBrush="{StaticResource BrushBorder}" BorderThickness="1" CornerRadius="8">
+                                    <MediaElement Source="{Binding Audio.SegmentPreviewUri, Mode=OneWay}" LoadedBehavior="Manual" UnloadedBehavior="Stop" Stretch="Uniform" />
+                                </Border>
+                            </Grid>
+                        </Border>
+
+                        <ScrollViewer Grid.Column="4" VerticalScrollBarVisibility="Auto">
+                            <StackPanel>
+                                <TextBlock Text="TTS Modeli" Style="{StaticResource FieldLabelStyle}" />
+                                <TextBlock Text="{Binding Audio.ModelDetails, Mode=OneWay}" Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" Margin="0,8,0,16" />
+                                <TextBlock Text="Ses Presetleri" Style="{StaticResource FieldLabelStyle}" />
+                                <ListBox ItemsSource="{Binding Audio.VoicePresets, Mode=OneWay}" DisplayMemberPath="DisplayName" MaxHeight="140" Background="{StaticResource BrushInput}" BorderBrush="{StaticResource BrushBorder}" Foreground="{StaticResource BrushText}" Margin="0,8,0,16" />
+                                <Button Content="Secili Repligi Uret" Command="{Binding Audio.GenerateSelectedSegmentCommand}" Style="{StaticResource SecondaryButtonStyle}" />
+                                <Button Content="Tum Replikleri Uret" Command="{Binding Audio.GenerateAllSegmentsCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="0,8,0,0" />
+                                <Button Content="Konusma Kanalini Olustur" Command="{Binding Audio.CreateSpeechTrackCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,18,0,0" />
+                                <MediaElement Source="{Binding Audio.SpeechTrackPreviewUri, Mode=OneWay}" LoadedBehavior="Manual" UnloadedBehavior="Stop" Height="54" Stretch="Uniform" Margin="0,8,0,0" />
+                                <Button Content="Konusmayi Videoya Ekle" Command="{Binding Audio.CreateFinalDialogueVideoCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,8,0,0" />
+                                <MediaElement Source="{Binding Audio.FinalDialogueVideoPreviewUri, Mode=OneWay}" LoadedBehavior="Manual" UnloadedBehavior="Stop" Height="130" Stretch="Uniform" Margin="0,8,0,0" />
+                                <TextBlock Text="Bu surum yalnizca DialogueJson icindeki karakter repliklerini seslendirir. Varsayilan KugelAudio sesi request'e voice preset yazmadan kullanilir; reference audio/voice cloning eklenmez." Foreground="{StaticResource BrushMutedText}" TextWrapping="Wrap" Margin="0,16,0,0" />
                             </StackPanel>
                         </ScrollViewer>
                     </Grid>

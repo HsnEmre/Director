@@ -65,9 +65,11 @@ public sealed class VideoMetadataService : IVideoMetadataService
                 var codecType = ReadString(stream, "codec_type");
                 if (codecType == "video")
                 {
+                    metadata.HasVideo = true;
                     metadata.Width = ReadInt(stream, "width");
                     metadata.Height = ReadInt(stream, "height");
                     metadata.Codec = ReadString(stream, "codec_name");
+                    metadata.PixelFormat = ReadString(stream, "pix_fmt");
                     metadata.FrameCount = ReadInt(stream, "nb_frames");
                     metadata.Fps = ParseRate(ReadString(stream, "avg_frame_rate"));
                     metadata.DurationSeconds = ReadDouble(stream, "duration");
@@ -75,6 +77,11 @@ public sealed class VideoMetadataService : IVideoMetadataService
                 else if (codecType == "audio")
                 {
                     metadata.HasAudio = true;
+                    metadata.AudioCodec = ReadString(stream, "codec_name");
+                    metadata.AudioDurationSeconds = ReadDouble(stream, "duration");
+                    metadata.AudioChannels = ReadInt(stream, "channels");
+                    metadata.AudioSampleRate = ReadInt(stream, "sample_rate");
+                    metadata.AudioChannelLayout = ReadString(stream, "channel_layout");
                 }
             }
         }

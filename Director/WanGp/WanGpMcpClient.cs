@@ -13,6 +13,10 @@ namespace Director.WanGp;
 public sealed class WanGpMcpClient : IWanGpClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly HashSet<string> GeneratedMediaExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".mp4", ".webm", ".mov", ".mkv", ".wav", ".flac", ".mp3", ".ogg", ".m4a"
+    };
     private readonly WanGpOptions _options;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<WanGpMcpClient> _logger;
@@ -136,6 +140,40 @@ public sealed class WanGpMcpClient : IWanGpClient
         return models;
     }
 
+    public async Task<IReadOnlyList<WanGpModelInfo>> GetAvailableAudioModelsAsync(CancellationToken cancellationToken = default)
+    {
+        var allNode = await CallToolNodeAsync("wangp_list_models", new Dictionary<string, object?>
+        {
+            ["include_availability"] = true
+        }, cancellationToken);
+
+        var audioNode = await CallToolNodeAsync("wangp_list_models", new Dictionary<string, object?>
+        {
+            ["main_output"] = "audio",
+            ["include_availability"] = true
+        }, cancellationToken);
+
+        var textAudioNode = await CallToolNodeAsync("wangp_list_models", new Dictionary<string, object?>
+        {
+            ["main_output"] = "audio",
+            ["inputs"] = "text",
+            ["include_availability"] = true
+        }, cancellationToken);
+
+        var models = ExtractAudioModels(audioNode)
+            .Concat(ExtractAudioModels(textAudioNode))
+            .Concat(ExtractAudioModels(allNode).Where(model =>
+                model.ModelType.Contains("kugel", StringComparison.OrdinalIgnoreCase) ||
+                model.DisplayName.Contains("kugel", StringComparison.OrdinalIgnoreCase)))
+            .GroupBy(model => model.ModelType, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .Where(model => !string.IsNullOrWhiteSpace(model.ModelType))
+            .ToList();
+
+        WriteAudioDiagnostics(allNode, models);
+        return models;
+    }
+
     public async Task<IReadOnlyList<string>> ListToolsAsync(CancellationToken cancellationToken = default)
     {
         await using var client = await CreateClientAsync(cancellationToken);
@@ -231,6 +269,13 @@ public sealed class WanGpMcpClient : IWanGpClient
             ExternalJobId = ReadString(obj, "job_id", "jobId", "id"),
             RawResponse = obj
         };
+    }
+
+    public Task<WanGpGenerationSubmission> SubmitAudioGenerationAsync(
+        IReadOnlyDictionary<string, object?> source,
+        CancellationToken cancellationToken = default)
+    {
+        return SubmitVideoGenerationAsync(source, cancellationToken);
     }
 
     public async Task<WanGpJobSnapshot> GetJobAsync(string externalJobId, CancellationToken cancellationToken = default)
@@ -462,6 +507,90 @@ public sealed class WanGpMcpClient : IWanGpClient
         }
     }
 
+    private static IEnumerable<WanGpModelInfo> ExtractAudioModels(JsonNode node)
+    {
+        var models = new List<WanGpModelInfo>();
+        var modelsNode = ReadArray(node, "models", "result") ?? node as JsonArray ?? new JsonArray();
+        foreach (var item in modelsNode)
+        {
+            if (item is not JsonObject obj)
+            {
+                continue;
+            }
+
+            var info = new WanGpModelInfo
+            {
+                ModelType = ReadString(obj, "model_type", "modelType", "type", "name"),
+                DisplayName = ReadString(obj, "display_name", "displayName", "name", "model_type"),
+                Availability = ReadString(obj, "availability", "status"),
+                MainOutput = ReadString(obj, "main_output", "mainOutput", "outputs"),
+                Family = ReadString(obj, "family"),
+                Architecture = ReadString(obj, "architecture"),
+                BaseModelType = ReadString(obj, "base_model_type", "baseModelType"),
+                Outputs = ReadString(obj, "outputs"),
+                Inputs = ReadString(obj, "inputs", "input_types", "media_inputs"),
+                RawMetadata = obj.DeepClone() as JsonObject ?? new JsonObject()
+            };
+
+            var outputsAudio = SupportsValue(obj, "audio", "main_output", "mainOutput", "outputs") ||
+                HasKeyValue(obj, "output", "audio") ||
+                HasKeyValue(obj, "outputs", "audio");
+            var inputsText = SupportsValue(obj, "text", "inputs", "input_types") ||
+                HasKeyValue(obj, "input", "text") ||
+                HasKeyValue(obj, "inputs", "text") ||
+                obj.ToJsonString().Contains("prompt", StringComparison.OrdinalIgnoreCase);
+
+            if (outputsAudio && inputsText)
+            {
+                models.Add(info);
+            }
+        }
+
+        return models;
+    }
+
+    private static void WriteAudioDiagnostics(JsonNode allModels, IReadOnlyList<WanGpModelInfo> filtered)
+    {
+        try
+        {
+            var root = Path.Combine(Path.GetTempPath(), "DirectorWanGpAudioDiagnostics");
+            Directory.CreateDirectory(root);
+            WriteSanitizedAudioModels(Path.Combine(root, "all-audio-models.json"), filtered);
+            WriteSanitizedAudioModels(
+                Path.Combine(root, "kugelaudio-models.json"),
+                filtered.Where(model =>
+                    model.ModelType.Contains("kugel", StringComparison.OrdinalIgnoreCase) ||
+                    model.DisplayName.Contains("kugel", StringComparison.OrdinalIgnoreCase)).ToList());
+        }
+        catch
+        {
+            // Diagnostics must not affect discovery.
+        }
+    }
+
+    private static void WriteSanitizedAudioModels(string path, IReadOnlyList<WanGpModelInfo> models)
+    {
+        var array = new JsonArray();
+        foreach (var model in models)
+        {
+            array.Add(new JsonObject
+            {
+                ["model_type"] = model.ModelType,
+                ["name"] = model.DisplayName,
+                ["family"] = model.Family,
+                ["architecture"] = model.Architecture,
+                ["inputs"] = model.Inputs,
+                ["outputs"] = model.Outputs,
+                ["availability"] = model.Availability,
+                ["capabilities"] = model.RawMetadata["capabilities"]?.DeepClone(),
+                ["media_inputs"] = model.RawMetadata["media_inputs"]?.DeepClone(),
+                ["schema_keys"] = new JsonArray(model.RawMetadata.Select(pair => JsonValue.Create(pair.Key)).ToArray())
+            });
+        }
+
+        File.WriteAllText(path, array.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+    }
+
     private static int ReadInt(JsonObject obj, int fallback, params string[] keys)
     {
         return ReadNullableInt(obj, keys) ?? fallback;
@@ -533,19 +662,45 @@ public sealed class WanGpMcpClient : IWanGpClient
 
     private static List<string> ReadGeneratedFiles(JsonObject? result)
     {
-        if (result is null ||
-            !result.TryGetPropertyValue("generated_files", out var filesNode) ||
-            filesNode is not JsonArray files)
+        if (result is null)
         {
             return [];
         }
 
-        return files
+        var paths = new List<string>();
+        if (result.TryGetPropertyValue("artifacts", out var artifactsNode) && artifactsNode is JsonArray artifacts)
+        {
+            paths.AddRange(artifacts
+                .OfType<JsonObject>()
+                .Where(artifact => IsGeneratedMediaArtifact(artifact))
+                .Select(artifact => ReadString(artifact, "path", "file_path", "filePath", "output_path", "url"))
+                .Where(IsSupportedGeneratedMediaPath));
+        }
+
+        if (result.TryGetPropertyValue("generated_files", out var filesNode) && filesNode is JsonArray files)
+        {
+            paths.AddRange(files
             .Select(file => file?.ToString())
             .Where(path => !string.IsNullOrWhiteSpace(path))
             .Select(path => path!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+            .Where(IsSupportedGeneratedMediaPath));
+        }
+
+        return paths.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static bool IsGeneratedMediaArtifact(JsonObject artifact)
+    {
+        var mediaType = ReadString(artifact, "media_type", "mediaType", "type", "mime_type", "mimeType");
+        var path = ReadString(artifact, "path", "file_path", "filePath", "output_path", "url");
+        return mediaType.Contains("video", StringComparison.OrdinalIgnoreCase) ||
+            mediaType.Contains("audio", StringComparison.OrdinalIgnoreCase) ||
+            IsSupportedGeneratedMediaPath(path);
+    }
+
+    private static bool IsSupportedGeneratedMediaPath(string? path)
+    {
+        return !string.IsNullOrWhiteSpace(path) && GeneratedMediaExtensions.Contains(Path.GetExtension(path));
     }
 
     private static string? ReadLatestEventValue(JsonObject obj, params string[] keys)

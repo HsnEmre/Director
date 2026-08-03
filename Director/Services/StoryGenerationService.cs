@@ -1,5 +1,6 @@
-using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Director.Data;
 using Director.Dtos.StoryGeneration;
 using Director.Enums;
@@ -7,6 +8,7 @@ using Director.Models;
 using Director.Ollama;
 using Director.Options;
 using Director.Services.Interfaces;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -15,8 +17,8 @@ namespace Director.Services;
 
 public sealed class StoryGenerationService : IStoryGenerationService
 {
-    private const int OutlineBlockSize = 25;
-    private static readonly ConcurrentDictionary<int, SemaphoreSlim> ProjectLocks = new();
+    private const int OutlineBlockSize = 1;
+    private const int ResumeSceneBatchSize = 1;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly string[] VideoPromptAudioTerms =
     {
@@ -27,6 +29,9 @@ public sealed class StoryGenerationService : IStoryGenerationService
     private readonly IDbContextFactory<AppDbContext> _dbContextFactory;
     private readonly IOllamaClient _ollamaClient;
     private readonly IStoryPromptBuilder _promptBuilder;
+    private readonly IGpuGenerationCoordinator _gpuCoordinator;
+    private readonly IProjectGenerationLeaseCoordinator? _projectLeaseCoordinator;
+    private readonly IOllamaFailureDiagnosticWriter _failureDiagnosticWriter;
     private readonly OllamaOptions _options;
     private readonly ILogger<StoryGenerationService> _logger;
 
@@ -34,14 +39,32 @@ public sealed class StoryGenerationService : IStoryGenerationService
         IDbContextFactory<AppDbContext> dbContextFactory,
         IOllamaClient ollamaClient,
         IStoryPromptBuilder promptBuilder,
+        IGpuGenerationCoordinator gpuCoordinator,
+        IProjectGenerationLeaseCoordinator projectLeaseCoordinator,
+        IOllamaFailureDiagnosticWriter failureDiagnosticWriter,
         IOptions<OllamaOptions> options,
         ILogger<StoryGenerationService> logger)
     {
         _dbContextFactory = dbContextFactory;
         _ollamaClient = ollamaClient;
         _promptBuilder = promptBuilder;
+        _gpuCoordinator = gpuCoordinator;
+        _projectLeaseCoordinator = projectLeaseCoordinator;
+        _failureDiagnosticWriter = failureDiagnosticWriter;
         _options = options.Value;
         _logger = logger;
+    }
+
+    public StoryGenerationService(
+        IDbContextFactory<AppDbContext> dbContextFactory,
+        IOllamaClient ollamaClient,
+        IStoryPromptBuilder promptBuilder,
+        IGpuGenerationCoordinator gpuCoordinator,
+        IOllamaFailureDiagnosticWriter failureDiagnosticWriter,
+        IOptions<OllamaOptions> options,
+        ILogger<StoryGenerationService> logger)
+        : this(dbContextFactory, ollamaClient, promptBuilder, gpuCoordinator, null!, failureDiagnosticWriter, options, logger)
+    {
     }
 
     public async Task<StoryGenerationProgressResult> GenerateStoryAsync(
@@ -49,11 +72,7 @@ public sealed class StoryGenerationService : IStoryGenerationService
         IProgress<StoryGenerationProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        var projectLock = ProjectLocks.GetOrAdd(filmProjectId, _ => new SemaphoreSlim(1, 1));
-        if (!await projectLock.WaitAsync(0, cancellationToken))
-        {
-            throw new InvalidOperationException("Bu proje icin hikaye uretimi zaten calisiyor.");
-        }
+        await using var projectLease = await AcquireProjectLeaseAsync(filmProjectId, cancellationToken);
 
         try
         {
@@ -67,31 +86,62 @@ public sealed class StoryGenerationService : IStoryGenerationService
                 throw new InvalidOperationException(health.Message);
             }
 
-            Report(progress, "Ollama kontrolu", $"{_options.Model} modeli kontrol ediliyor.", 0, project.CalculatedClipCount, 4, GenerationLogLevel.Information);
-            await _ollamaClient.IsModelAvailableAsync(_options.Model, cancellationToken);
-            Report(progress, "Ollama kontrolu", $"{_options.Model} modeli bulundu.", 0, project.CalculatedClipCount, 5, GenerationLogLevel.Success);
+            Report(progress, "Ollama kontrolu", $"{_options.StoryTextModel} metin modeli kontrol ediliyor.", 0, project.CalculatedClipCount, 4, GenerationLogLevel.Information);
+            await _ollamaClient.IsModelAvailableAsync(_options.StoryTextModel, cancellationToken);
+            Report(progress, "Ollama kontrolu", $"{_options.StoryTextModel} metin modeli bulundu.", 0, project.CalculatedClipCount, 5, GenerationLogLevel.Success);
 
-            Report(progress, "Film omurgasi", "Film omurgasi icin istek hazirlaniyor.", 0, project.CalculatedClipCount, 8, GenerationLogLevel.Information);
-            var bible = await GenerateWithOneRepairAsync<StoryBibleResponse>(
-                new[]
+            var resumeState = await LoadResumeStateAsync(project.Id, cancellationToken);
+            EnsureNoDuplicateScenes(resumeState, project.Id);
+            if (resumeState.Story is not null && resumeState.CharacterCount > 0)
+            {
+                Report(progress, "Devam", "Mevcut hikaye bulundu, tekrar uretilmeyecek.", resumeState.SceneNumbers.Count, project.CalculatedClipCount, 6, GenerationLogLevel.Success);
+                Report(progress, "Devam", $"{resumeState.CharacterCount} karakter bulundu.", resumeState.SceneNumbers.Count, project.CalculatedClipCount, 7, GenerationLogLevel.Success);
+                Report(progress, "Devam", $"Kaydedilmis sahne sayisi: {resumeState.SceneNumbers.Count}/{project.CalculatedClipCount}", resumeState.SceneNumbers.Count, project.CalculatedClipCount, 8, GenerationLogLevel.Information);
+
+                if (TryGetCompletionError(resumeState.SceneNumbers, resumeState.TotalDurationSeconds, project.CalculatedClipCount, project.ClipDurationSeconds) is null)
                 {
-                    new OllamaChatMessage("system", _promptBuilder.BuildStoryBibleSystemPrompt()),
-                    new OllamaChatMessage("user", _promptBuilder.BuildStoryBibleUserPrompt(project))
-                },
-                StoryJsonSchemas.StoryBibleSchema(),
-                progress,
-                "Film omurgasi",
-                cancellationToken);
+                    await UpdateProjectStatusAsync(project.Id, FilmProjectStatus.StoryGenerated, cancellationToken);
+                    Report(progress, "Tamamlandi", "Hikaye ve 30 sahne zaten tamamlanmis.", project.CalculatedClipCount, project.CalculatedClipCount, 100, GenerationLogLevel.Success);
+                    return new StoryGenerationProgressResult
+                    {
+                        FilmProjectId = project.Id,
+                        FilmStoryId = resumeState.Story.Id,
+                        Title = resumeState.Story.Title,
+                        GeneratedSceneCount = project.CalculatedClipCount
+                    };
+                }
 
-            Report(progress, "Film omurgasi", "JSON semasi dogrulaniyor.", 0, project.CalculatedClipCount, 18, GenerationLogLevel.Information);
+                var firstMissing = FindFirstMissingScene(resumeState.SceneNumbers, project.CalculatedClipCount);
+                Report(progress, "Devam", $"Ilk eksik sahne: {firstMissing}", resumeState.SceneNumbers.Count, project.CalculatedClipCount, 9, GenerationLogLevel.Information);
+                await GenerateAllMissingScenesCoreAsync(project, resumeState.Story.Id, progress, cancellationToken);
+                var finalState = await LoadResumeStateAsync(project.Id, cancellationToken);
+                var completionError = TryGetCompletionError(finalState.SceneNumbers, finalState.TotalDurationSeconds, project.CalculatedClipCount, project.ClipDurationSeconds);
+                if (completionError is not null)
+                {
+                    throw new InvalidOperationException(completionError);
+                }
+
+                await UpdateProjectStatusAsync(project.Id, FilmProjectStatus.StoryGenerated, cancellationToken);
+                Report(progress, "Tamamlandi", "Hikaye ve 30 sahne tamamlandi.", project.CalculatedClipCount, project.CalculatedClipCount, 100, GenerationLogLevel.Success);
+                return new StoryGenerationProgressResult
+                {
+                    FilmProjectId = project.Id,
+                    FilmStoryId = finalState.Story!.Id,
+                    Title = finalState.Story.Title,
+                    GeneratedSceneCount = project.CalculatedClipCount
+                };
+            }
+
+            Report(progress, "Film omurgasi", "Hikaye omurgasi hazirlaniyor.", 0, project.CalculatedClipCount, 8, GenerationLogLevel.Information);
+            var bible = await GenerateStoryBibleWithCharacterRepairAsync(project, progress, cancellationToken);
+
+            Report(progress, "Film omurgasi", "Karakter alanlari dogrulaniyor.", 0, project.CalculatedClipCount, 18, GenerationLogLevel.Information);
             ValidateStoryBible(bible);
+            Report(progress, "Film omurgasi", "Karakterler kaydediliyor.", 0, project.CalculatedClipCount, 19, GenerationLogLevel.Information);
             var story = await SaveStoryBibleAsync(project.Id, bible, cancellationToken);
             Report(progress, "Film omurgasi", $"{bible.Characters.Count} karakter ve film omurgasi SQL'e kaydedildi.", 0, project.CalculatedClipCount, 20, GenerationLogLevel.Success);
 
-            var outlines = await GenerateOutlinesAsync(project, story, progress, cancellationToken);
-            ValidateSceneNumbers(outlines.Select(scene => scene.SceneNumber), 1, project.CalculatedClipCount, "Sahne plani");
-
-            await GenerateAndSaveScenePackagesAsync(project, story.Id, outlines, progress, cancellationToken);
+            await GenerateAllMissingScenesCoreAsync(project, story.Id, progress, cancellationToken);
 
             await UpdateProjectStatusAsync(project.Id, FilmProjectStatus.StoryGenerated, cancellationToken);
             Report(progress, "Tamamlandi", "Hikaye ve sahne plani kaydedildi.", project.CalculatedClipCount, project.CalculatedClipCount, 100, GenerationLogLevel.Success);
@@ -104,10 +154,22 @@ public sealed class StoryGenerationService : IStoryGenerationService
                 GeneratedSceneCount = project.CalculatedClipCount
             };
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning("Hikaye uretimi iptal edildi. FilmProjectId: {FilmProjectId}", filmProjectId);
-            await MarkFailedIfPossibleAsync(filmProjectId, CancellationToken.None);
+            await UpdateProjectStatusAsync(filmProjectId, FilmProjectStatus.StoryGenerating, CancellationToken.None);
+            throw;
+        }
+        catch (TimeoutException ex)
+        {
+            _logger.LogWarning(ex, "Hikaye uretimi aktivite timeout ile durdu; checkpointler korunuyor. FilmProjectId: {FilmProjectId}", filmProjectId);
+            await UpdateProjectStatusAsync(filmProjectId, FilmProjectStatus.StoryGenerating, CancellationToken.None);
+            throw;
+        }
+        catch (StorySceneGenerationException ex)
+        {
+            _logger.LogWarning(ex, "Sahne cevabi dogrulanamadi; checkpointler korunuyor. FilmProjectId={FilmProjectId}; SceneNumber={SceneNumber}; Stage={Stage}; Diagnostic={DiagnosticPath}", filmProjectId, ex.SceneNumber, ex.Stage, ex.LogPath);
+            await UpdateProjectStatusAsync(filmProjectId, FilmProjectStatus.StoryGenerating, CancellationToken.None);
             throw;
         }
         catch (Exception ex)
@@ -116,9 +178,130 @@ public sealed class StoryGenerationService : IStoryGenerationService
             await MarkFailedIfPossibleAsync(filmProjectId, CancellationToken.None);
             throw;
         }
-        finally
+    }
+
+    public Task<StoryGenerationProgressResult> GenerateAllMissingScenesAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        GenerateStoryAsync(filmProjectId, progress, cancellationToken);
+
+    public async Task<StoryGenerationProgressResult> GenerateNextMissingSceneAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var projectLease = await AcquireProjectLeaseAsync(filmProjectId, cancellationToken);
+        return await GenerateNextMissingSceneCoreAsync(filmProjectId, progress, cancellationToken, checkModel: true);
+    }
+
+    public async Task<StoryGenerationProgressResult> GenerateUpToMissingScenesAsync(
+        int filmProjectId,
+        int maximumSceneCount,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (maximumSceneCount <= 0)
         {
-            projectLock.Release();
+            throw new ArgumentOutOfRangeException(nameof(maximumSceneCount));
+        }
+
+        await using var projectLease = await AcquireProjectLeaseAsync(filmProjectId, cancellationToken);
+        StoryGenerationProgressResult? result = null;
+        for (var index = 0; index < maximumSceneCount; index++)
+        {
+            result = await GenerateNextMissingSceneCoreAsync(filmProjectId, progress, cancellationToken, checkModel: index == 0);
+        }
+
+        return result ?? throw new InvalidOperationException("No scene generation was requested.");
+    }
+
+    private ValueTask<IAsyncDisposable> AcquireProjectLeaseAsync(int filmProjectId, CancellationToken cancellationToken)
+    {
+        if (_projectLeaseCoordinator is null)
+        {
+            throw new InvalidOperationException("Project generation lease coordinator is not configured.");
+        }
+
+        return _projectLeaseCoordinator.AcquireAsync(filmProjectId, cancellationToken);
+    }
+
+    private async Task<StoryGenerationProgressResult> GenerateNextMissingSceneCoreAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress,
+        CancellationToken cancellationToken,
+        bool checkModel)
+    {
+        var project = await LoadProjectSnapshotAsync(filmProjectId, cancellationToken);
+        await UpdateProjectStatusAsync(project.Id, FilmProjectStatus.StoryGenerating, cancellationToken);
+        if (checkModel)
+        {
+            Report(progress, "Ollama kontrolu", $"{_options.StoryTextModel} metin modeli kontrol ediliyor.", 0, project.CalculatedClipCount, 2, GenerationLogLevel.Information);
+            await _ollamaClient.IsModelAvailableAsync(_options.StoryTextModel, cancellationToken);
+        }
+
+        var state = await LoadResumeStateAsync(project.Id, cancellationToken);
+        EnsureNoDuplicateScenes(state, project.Id);
+        if (state.Story is null || state.CharacterCount == 0)
+        {
+            throw new InvalidOperationException("Mevcut FilmStory ve StoryCharacter kayitlari bulunmadan sahne resume baslatilamaz.");
+        }
+
+        Report(progress, "Devam", "Mevcut hikaye bulundu, tekrar uretilmeyecek.", state.SceneNumbers.Count, project.CalculatedClipCount, 5, GenerationLogLevel.Success);
+        Report(progress, "Devam", $"{state.CharacterCount} karakter bulundu.", state.SceneNumbers.Count, project.CalculatedClipCount, 6, GenerationLogLevel.Success);
+        Report(progress, "Devam", $"Kaydedilmis sahne sayisi: {state.SceneNumbers.Count}/{project.CalculatedClipCount}", state.SceneNumbers.Count, project.CalculatedClipCount, 7, GenerationLogLevel.Information);
+
+        if (TryGetCompletionError(state.SceneNumbers, state.TotalDurationSeconds, project.CalculatedClipCount, project.ClipDurationSeconds) is null)
+        {
+            await UpdateProjectStatusAsync(project.Id, FilmProjectStatus.StoryGenerated, cancellationToken);
+            Report(progress, "Tamamlandi", "Hikaye ve 30 sahne zaten tamamlanmis.", project.CalculatedClipCount, project.CalculatedClipCount, 100, GenerationLogLevel.Success);
+            return new StoryGenerationProgressResult { FilmProjectId = project.Id, FilmStoryId = state.Story.Id, Title = state.Story.Title, GeneratedSceneCount = project.CalculatedClipCount };
+        }
+
+        var firstMissing = FindFirstMissingScene(state.SceneNumbers, project.CalculatedClipCount);
+        Report(progress, "Devam", $"Ilk eksik sahne: {firstMissing}", state.SceneNumbers.Count, project.CalculatedClipCount, 8, GenerationLogLevel.Information);
+        var scene = await GenerateSingleScenePackageAsync(project, state.Story.Id, firstMissing, progress, cancellationToken);
+        var saved = await SaveSceneBatchAsync(project, state.Story.Id, [scene], cancellationToken);
+        if (!saved.Contains(firstMissing))
+        {
+            throw new InvalidOperationException($"{firstMissing}. sahne kaydedilemedi.");
+        }
+
+        var newState = await LoadResumeStateAsync(project.Id, cancellationToken);
+        if (TryGetCompletionError(newState.SceneNumbers, newState.TotalDurationSeconds, project.CalculatedClipCount, project.ClipDurationSeconds) is null)
+        {
+            await UpdateProjectStatusAsync(project.Id, FilmProjectStatus.StoryGenerated, cancellationToken);
+        }
+
+        Report(progress, $"Sahne {firstMissing}", $"Sahne {firstMissing} kaydedildi. Toplam ilerleme: {newState.SceneNumbers.Count}/{project.CalculatedClipCount}", newState.SceneNumbers.Count, project.CalculatedClipCount, ProgressFor(newState.SceneNumbers.Count, project.CalculatedClipCount), GenerationLogLevel.Success, firstMissing, firstMissing);
+        return new StoryGenerationProgressResult { FilmProjectId = project.Id, FilmStoryId = state.Story.Id, Title = state.Story.Title, GeneratedSceneCount = newState.SceneNumbers.Count };
+    }
+
+    private async Task GenerateAllMissingScenesCoreAsync(
+        FilmProject project,
+        int filmStoryId,
+        IProgress<StoryGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var state = await LoadResumeStateAsync(project.Id, cancellationToken);
+            EnsureNoDuplicateScenes(state, project.Id);
+            var nextScene = FindFirstMissingScene(state.SceneNumbers, project.CalculatedClipCount);
+            if (nextScene > project.CalculatedClipCount)
+            {
+                return;
+            }
+
+            Report(progress, $"Sahne {nextScene}", $"Sahne {nextScene} hazirlaniyor.", state.SceneNumbers.Count, project.CalculatedClipCount, ProgressFor(state.SceneNumbers.Count, project.CalculatedClipCount), GenerationLogLevel.Information, nextScene, nextScene);
+            var scene = await GenerateSingleScenePackageAsync(project, filmStoryId, nextScene, progress, cancellationToken);
+            var saved = await SaveSceneBatchAsync(project, filmStoryId, [scene], cancellationToken);
+            if (!saved.Contains(nextScene) && !await SceneExistsAsync(project.Id, nextScene, cancellationToken))
+            {
+                throw new InvalidOperationException($"{nextScene}. sahne checkpoint olarak kaydedilemedi.");
+            }
+
+            Report(progress, $"Sahne {nextScene}", $"Sahne {nextScene} kaydedildi. Ilerleme: {state.SceneNumbers.Count + 1}/{project.CalculatedClipCount}", state.SceneNumbers.Count + 1, project.CalculatedClipCount, ProgressFor(state.SceneNumbers.Count + 1, project.CalculatedClipCount), GenerationLogLevel.Success, nextScene, nextScene);
         }
     }
 
@@ -131,33 +314,293 @@ public sealed class StoryGenerationService : IStoryGenerationService
             ?? throw new InvalidOperationException("Film projesi bulunamadi.");
     }
 
-    private async Task<T> GenerateWithOneRepairAsync<T>(
+    private async Task<StoryResumeState> LoadResumeStateAsync(int filmProjectId, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var story = await db.FilmStories
+            .AsNoTracking()
+            .Include(item => item.Characters)
+            .FirstOrDefaultAsync(item => item.FilmProjectId == filmProjectId, cancellationToken);
+        var scenes = await db.FilmScenes
+            .AsNoTracking()
+            .Where(item => item.FilmProjectId == filmProjectId)
+            .Select(item => new { item.SceneNumber, item.DurationSeconds })
+            .ToListAsync(cancellationToken);
+
+        return new StoryResumeState(
+            story,
+            story?.Characters.Count ?? 0,
+            scenes.Select(item => item.SceneNumber).OrderBy(item => item).ToHashSet(),
+            scenes.Sum(item => item.DurationSeconds),
+            scenes.GroupBy(item => item.SceneNumber).Count(group => group.Count() > 1));
+    }
+
+    private static void EnsureNoDuplicateScenes(StoryResumeState state, int filmProjectId)
+    {
+        if (state.DuplicateSceneGroups > 0)
+        {
+            throw new InvalidOperationException($"FilmProjectId={filmProjectId} için yinelenen SceneNumber kayıtları bulundu; üretim güvenli biçimde durduruldu.");
+        }
+    }
+
+    internal async Task<T> GenerateWithOneRepairAsync<T>(
         IReadOnlyList<OllamaChatMessage> messages,
         object schema,
         IProgress<StoryGenerationProgress>? progress,
         string phase,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? modelOverride = null,
+        OllamaFailureContext? failureContext = null,
+        Action<T>? validateResponse = null,
+        int gpuProjectId = 0,
+        int gpuSceneId = 0)
     {
+        var selectedModel = string.IsNullOrWhiteSpace(modelOverride) ? _options.StoryTextModel : modelOverride;
+        var streamProgress = CreateOllamaStreamProgress(progress, phase);
+        var initialSettings = failureContext is null
+            ? null
+            : new OllamaGenerationSettings
+            {
+                OperationName = failureContext.OperationName,
+                FilmProjectId = failureContext.FilmProjectId,
+                SceneNumber = failureContext.SceneNumber,
+                Think = false
+            };
+        OllamaResponseException initialFailure;
         try
         {
-            Report(progress, phase, "Ollama istegi gonderildi, response bekleniyor.", 0, 0, null, GenerationLogLevel.Information);
-            var result = await _ollamaClient.ChatStructuredAsync<T>(messages, schema, cancellationToken);
+            var result = await ExecuteGpuCallAsync(
+                () => _ollamaClient.ChatStructuredDetailedAsync<T>(
+                    messages,
+                    schema,
+                    selectedModel,
+                    TimeSpan.FromMinutes(Math.Max(1, _options.SceneHardTimeoutMinutes)),
+                    cancellationToken,
+                    streamProgress,
+                    initialSettings),
+                failureContext?.FilmProjectId ?? gpuProjectId,
+                failureContext?.SceneNumber ?? gpuSceneId,
+                cancellationToken);
+            ValidateDetailedResult(result, validateResponse);
             Report(progress, phase, "Ollama response alindi ve deserialize edildi.", 0, 0, null, GenerationLogLevel.Success);
-            return result;
+            return result.Value;
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("JSON", StringComparison.OrdinalIgnoreCase))
+        catch (OllamaResponseException ex) when (ex is OllamaIncompleteStreamException or OllamaHttpResponseException or OllamaResponseTooLargeException)
         {
-            _logger.LogWarning(ex, "JSON parse basarisiz oldu. Tek repair denemesi yapilacak.");
-            Report(progress, phase, "JSON parse basarisiz oldu; tek repair denemesi yapiliyor.", 0, 0, null, GenerationLogLevel.Warning);
+            var logPath = await WriteFailureDiagnosticAsync(failureContext, "initial", ex, cancellationToken);
+            throw CreateSceneFailureOrOriginal(failureContext, ex, logPath);
+        }
+        catch (OllamaResponseException ex)
+        {
+            initialFailure = ex;
+        }
+
+        var initialLogPath = await WriteFailureDiagnosticAsync(failureContext, "initial", initialFailure, cancellationToken);
+        _logger.LogWarning(
+            "Structured response failed. Model={Model}; Stage={Stage}; ContentLength={ContentLength}; Done={Done}; DoneReason={DoneReason}; repair will run once. Diagnostic={DiagnosticPath}",
+            selectedModel,
+            initialFailure.Stage,
+            initialFailure.ResponseContent.Length,
+            initialFailure.Metadata.Done,
+            initialFailure.Metadata.DoneReason,
+            initialLogPath);
+        Report(progress, phase, $"Model cevabi dogrulanamadi ({initialFailure.Stage}); ayni 30B modelle tek repair denemesi yapiliyor.", 0, 0, null, GenerationLogLevel.Warning);
+
+        var repairMessages = new List<OllamaChatMessage>
+        {
+            new("system", "Repair one malformed structured response. Return exactly one JSON object matching the supplied schema. Return JSON only. Do not include markdown, code fences, explanations or commentary. Preserve the original sceneNumber and intended content. Keep values concise."),
+            new("user", $"Expected JSON schema:\n{JsonSerializer.Serialize(schema, JsonOptions)}\n\nMalformed response to repair:\n{initialFailure.ResponseContent}")
+        };
+        var repairSettings = new OllamaGenerationSettings
+        {
+            Temperature = 0,
+            TopP = 0.1,
+            NumPredict = Math.Max(_options.SceneNumPredict, _options.SceneRepairNumPredict),
+            Think = false,
+            OperationName = failureContext?.OperationName,
+            FilmProjectId = failureContext?.FilmProjectId,
+            SceneNumber = failureContext?.SceneNumber
+        };
+
+        try
+        {
+            var repaired = await ExecuteGpuCallAsync(
+                () => _ollamaClient.ChatStructuredDetailedAsync<T>(
+                    repairMessages,
+                    schema,
+                    selectedModel,
+                    TimeSpan.FromMinutes(Math.Max(1, _options.SceneHardTimeoutMinutes)),
+                    cancellationToken,
+                    streamProgress,
+                    repairSettings),
+                failureContext?.FilmProjectId ?? gpuProjectId,
+                failureContext?.SceneNumber ?? gpuSceneId,
+                cancellationToken);
+            ValidateDetailedResult(repaired, validateResponse);
+            Report(progress, phase, "Repair cevabi dogrulandi.", 0, 0, null, GenerationLogLevel.Success);
+            return repaired.Value;
+        }
+        catch (OllamaResponseException repairFailure)
+        {
+            var repairLogPath = await WriteFailureDiagnosticAsync(failureContext, "repair", repairFailure, cancellationToken);
+            _logger.LogWarning(
+                "Repair response failed. Model={Model}; Stage={Stage}; ContentLength={ContentLength}; Done={Done}; DoneReason={DoneReason}; Diagnostic={DiagnosticPath}",
+                selectedModel,
+                repairFailure.Stage,
+                repairFailure.ResponseContent.Length,
+                repairFailure.Metadata.Done,
+                repairFailure.Metadata.DoneReason,
+                repairLogPath);
+            throw CreateSceneFailureOrOriginal(failureContext, repairFailure, repairLogPath);
+        }
+    }
+
+    private async Task<T> ExecuteGpuCallAsync<T>(
+        Func<Task<T>> operation,
+        int filmProjectId,
+        int sceneId,
+        CancellationToken cancellationToken)
+    {
+        if (_gpuCoordinator is null)
+        {
+            return await operation();
+        }
+
+        await using var gpuLease = await _gpuCoordinator.AcquireAsync(
+            GenerationOperationType.OllamaText,
+            filmProjectId,
+            sceneId,
+            cancellationToken);
+        return await operation();
+    }
+
+    private static void ValidateDetailedResult<T>(OllamaStructuredResult<T> result, Action<T>? validator)
+    {
+        if (validator is null)
+        {
+            return;
+        }
+
+        try
+        {
+            validator(result.Value);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or JsonException)
+        {
+            throw new OllamaStructuredResponseException(
+                "Model yaniti domain dogrulamasindan gecemedi.",
+                "DomainValidation",
+                result.RawResponse,
+                result.Metadata,
+                ex)
+            {
+                ValidationErrors = [ex.Message]
+            };
+        }
+    }
+
+    private async Task<string> WriteFailureDiagnosticAsync(
+        OllamaFailureContext? context,
+        string attemptType,
+        OllamaResponseException exception,
+        CancellationToken cancellationToken)
+    {
+        if (context is null)
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            return await _failureDiagnosticWriter.WriteAsync(context, attemptType, exception, cancellationToken);
+        }
+        catch (Exception diagnosticException)
+        {
+            _logger.LogError(diagnosticException, "Ollama failure diagnostic could not be written. ProjectId={ProjectId}; SceneNumber={SceneNumber}; Attempt={Attempt}", context.FilmProjectId, context.SceneNumber, attemptType);
+            return string.Empty;
+        }
+    }
+
+    private static Exception CreateSceneFailureOrOriginal(
+        OllamaFailureContext? context,
+        OllamaResponseException exception,
+        string logPath) =>
+        context is null
+            ? exception
+            : new StorySceneGenerationException(context.FilmProjectId, context.SceneNumber, exception.Stage, logPath, exception);
+
+    private async Task<StoryBibleResponse> GenerateStoryBibleWithCharacterRepairAsync(
+        FilmProject project,
+        IProgress<StoryGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var messages = new List<OllamaChatMessage>
+        {
+            new("system", _promptBuilder.BuildStoryBibleSystemPrompt()),
+            new("user", _promptBuilder.BuildStoryBibleUserPrompt(project))
+        };
+
+        var bible = await GenerateWithOneRepairAsync<StoryBibleResponse>(
+            messages,
+            StoryJsonSchemas.StoryBibleSchema(),
+            progress,
+            "Film omurgasi",
+            cancellationToken,
+            gpuProjectId: project.Id);
+        Report(progress, "Film omurgasi", "Hikaye omurgasi alindi.", 0, project.CalculatedClipCount, 16, GenerationLogLevel.Success);
+
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            var issues = StoryCharacterFieldValidator.ValidateIssues(bible);
+            if (issues.Count == 0)
+            {
+                return bible;
+            }
+
+            Report(progress, "Film omurgasi", "Karakter alanlari duzeltiliyor.", 0, project.CalculatedClipCount, 17, GenerationLogLevel.Warning);
+            _logger.LogWarning("Story bible character validation failed. FilmProjectId={FilmProjectId}; Issues={Issues}",
+                project.Id,
+                string.Join(" | ", issues.Select(issue => $"Index={issue.CharacterIndex}; Field={issue.FieldName}; ActualLength={issue.ActualLength}; Max={issue.MaxLength}; Reason={issue.Reason}")));
+
             var repairMessages = messages
                 .Concat(new[]
                 {
-                    new OllamaChatMessage("user", "Your previous response could not be parsed as the requested JSON schema. Return the same content again as strict JSON only, without markdown, comments or extra text.")
+                    new OllamaChatMessage("assistant", JsonSerializer.Serialize(bible, JsonOptions)),
+                    new OllamaChatMessage("user", BuildCharacterRepairPrompt(issues))
                 })
                 .ToList();
 
-            return await _ollamaClient.ChatStructuredAsync<T>(repairMessages, schema, cancellationToken);
+            bible = await ExecuteGpuCallAsync(
+                () => _ollamaClient.ChatStructuredAsync<StoryBibleResponse>(
+                    repairMessages,
+                    StoryJsonSchemas.StoryBibleSchema(),
+                    _options.StoryTextModel,
+                    TimeSpan.FromMinutes(Math.Max(1, _options.SceneHardTimeoutMinutes)),
+                    cancellationToken,
+                    CreateOllamaStreamProgress(progress, "Film omurgasi repair")),
+                project.Id,
+                0,
+                cancellationToken);
         }
+
+        StoryCharacterFieldValidator.Validate(bible);
+        return bible;
+    }
+
+    private static string BuildCharacterRepairPrompt(IReadOnlyList<StoryCharacterValidationIssue> issues)
+    {
+        var issueText = string.Join(Environment.NewLine, issues.Select(issue =>
+            $"- character index {issue.CharacterIndex}, key '{issue.CharacterKey}', field {issue.FieldName}, length {issue.ActualLength}/{issue.MaxLength}: {issue.Reason}"));
+
+        return $"""
+Fix only the characters array field placement problems listed below. Return the full StoryBible JSON again with the same title, plot summaries, world, visual direction and continuity rules.
+Do not invent new characters. Do not change characterKey values unless empty or duplicated.
+Role must be only a short narrative function, maximum 80 characters, for example: Protagonist, Ruler, Warrior Ally, Commander, Political Antagonist.
+Move appearance details to physicalDescription. Move clothing, fur, leather, armor, weapons and equipment details to clothingDescription.
+Do not truncate a clothing or physical description into role.
+Validation issues:
+{issueText}
+""";
     }
 
     private async Task<FilmStory> SaveStoryBibleAsync(int filmProjectId, StoryBibleResponse bible, CancellationToken cancellationToken)
@@ -238,7 +681,9 @@ public sealed class StoryGenerationService : IStoryGenerationService
                 StoryJsonSchemas.SceneOutlineBatchSchema(),
                 progress,
                 "Sahne plani",
-                cancellationToken);
+                cancellationToken,
+                gpuProjectId: project.Id,
+                gpuSceneId: start);
 
             ValidateSceneNumbers(response.Scenes.Select(scene => scene.SceneNumber), start, end, "Sahne plani blogu");
             outlines.AddRange(response.Scenes.OrderBy(scene => scene.SceneNumber).Select(scene => new SceneOutlineItemDto
@@ -294,7 +739,9 @@ public sealed class StoryGenerationService : IStoryGenerationService
                 StoryJsonSchemas.ScenePackageBatchSchema(),
                 progress,
                 $"Batch {batchNumber}/{totalBatches}",
-                cancellationToken);
+                cancellationToken,
+                gpuProjectId: project.Id,
+                gpuSceneId: start);
 
             ValidateSceneNumbers(response.Scenes.Select(scene => scene.SceneNumber), start, end, "Sahne paketi blogu");
             try
@@ -315,7 +762,9 @@ public sealed class StoryGenerationService : IStoryGenerationService
                     StoryJsonSchemas.ScenePackageBatchSchema(),
                     progress,
                     $"Batch {batchNumber}/{totalBatches}",
-                    cancellationToken);
+                    cancellationToken,
+                    gpuProjectId: project.Id,
+                    gpuSceneId: start);
 
                 ValidateSceneNumbers(response.Scenes.Select(scene => scene.SceneNumber), start, end, "Sahne paketi repair blogu");
                 SanitizeSilentVideoPrompts(response.Scenes);
@@ -328,15 +777,393 @@ public sealed class StoryGenerationService : IStoryGenerationService
         }
     }
 
+    private async Task GenerateMissingScenePackagesAsync(
+        FilmProject project,
+        int filmStoryId,
+        HashSet<int> existingSceneNumbers,
+        IProgress<StoryGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        while (existingSceneNumbers.Count < project.CalculatedClipCount)
+        {
+            var firstMissing = FindFirstMissingScene(existingSceneNumbers, project.CalculatedClipCount);
+            var start = GetBatchStart(firstMissing);
+            var end = Math.Min(project.CalculatedClipCount, start + ResumeSceneBatchSize - 1);
+            var startedAt = DateTime.Now;
+            Report(progress, $"Sahne paketi {start}-{end}", $"Sahne paketi {start}-{end} hazirlaniyor. Model={_options.Model}; Baslangic={startedAt:HH:mm:ss}", existingSceneNumbers.Count, project.CalculatedClipCount, ProgressFor(existingSceneNumbers.Count, project.CalculatedClipCount), GenerationLogLevel.Information, start, end);
+
+            var storySnapshot = await LoadStorySnapshotAsync(filmStoryId, cancellationToken);
+            var outlines = await GenerateOutlinesForRangeWithTimeoutRetryAsync(project, storySnapshot, start, end, progress, cancellationToken);
+            var previousContext = await BuildPreviousSceneContextAsync(project.Id, start, cancellationToken);
+            var messages = new List<OllamaChatMessage>
+            {
+                new("system", _promptBuilder.BuildScenePackageSystemPrompt()),
+                new("user", _promptBuilder.BuildScenePackageUserPrompt(project, storySnapshot, outlines, previousContext))
+            };
+
+            Report(progress, $"Sahne paketi {start}-{end}", "Qwen cevabi bekleniyor.", existingSceneNumbers.Count, project.CalculatedClipCount, null, GenerationLogLevel.Information, start, end);
+            var response = await GenerateScenePackageWithTimeoutRetryAsync(project, messages, start, end, progress, cancellationToken);
+            Report(progress, $"Sahne paketi {start}-{end}", $"Sahne paketi {start}-{end} dogrulaniyor.", existingSceneNumbers.Count, project.CalculatedClipCount, null, GenerationLogLevel.Information, start, end);
+            var characters = await LoadStoryCharactersAsync(filmStoryId, cancellationToken);
+            ValidateScenePackageBatch(response.Scenes, start, end, characters, project.ClipDurationSeconds);
+            SanitizeSilentVideoPrompts(response.Scenes);
+            ValidateSilentVideoPrompts(response.Scenes);
+
+            var saved = await SaveSceneBatchAsync(project, filmStoryId, response.Scenes.OrderBy(scene => scene.SceneNumber).ToList(), cancellationToken);
+            foreach (var sceneNumber in Enumerable.Range(start, end - start + 1))
+            {
+                if (saved.Contains(sceneNumber) || await SceneExistsAsync(project.Id, sceneNumber, cancellationToken))
+                {
+                    existingSceneNumbers.Add(sceneNumber);
+                }
+            }
+
+            var elapsed = DateTime.Now - startedAt;
+            Report(progress, $"Sahne paketi {start}-{end}", $"Sahne paketi {start}-{end} kaydedildi. Kaydedilen yeni sahne={saved.Count}; Gecen sure={elapsed:mm\\:ss}; Toplam ilerleme: {existingSceneNumbers.Count}/{project.CalculatedClipCount}", existingSceneNumbers.Count, project.CalculatedClipCount, ProgressFor(existingSceneNumbers.Count, project.CalculatedClipCount), GenerationLogLevel.Success, start, end);
+        }
+    }
+
+    private async Task<List<SceneOutlineItemDto>> GenerateOutlinesForRangeAsync(
+        FilmProject project,
+        FilmStory story,
+        int start,
+        int end,
+        IProgress<StoryGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var previousContext = await BuildPreviousSceneContextAsync(project.Id, start, cancellationToken);
+        var response = await GenerateWithOneRepairAsync<SceneOutlineBatchResponse>(
+            new[]
+            {
+                new OllamaChatMessage("system", _promptBuilder.BuildSceneOutlineSystemPrompt()),
+                new OllamaChatMessage("user", _promptBuilder.BuildSceneOutlineUserPrompt(project, story, start, end, previousContext))
+            },
+            StoryJsonSchemas.SceneOutlineBatchSchema(),
+            progress,
+            $"Sahne plani {start}-{end}",
+            cancellationToken,
+            gpuProjectId: project.Id,
+            gpuSceneId: start);
+
+        ValidateSceneNumbers(response.Scenes.Select(scene => scene.SceneNumber), start, end, "Sahne plani resume blogu");
+        return response.Scenes.OrderBy(scene => scene.SceneNumber).Select(scene => new SceneOutlineItemDto
+        {
+            SceneNumber = scene.SceneNumber,
+            Title = scene.Title,
+            StoryBeat = scene.StoryBeat,
+            ShortDescription = scene.ShortDescription,
+            Characters = scene.Characters,
+            Location = scene.Location,
+            TimeOfDay = scene.TimeOfDay,
+            ContinuityFromPreviousScene = scene.ContinuityFromPreviousScene
+        }).ToList();
+    }
+
+    private async Task<ScenePackageItemResponse> GenerateSingleScenePackageAsync(
+        FilmProject project,
+        int filmStoryId,
+        int sceneNumber,
+        IProgress<StoryGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var story = await LoadStorySnapshotAsync(filmStoryId, cancellationToken);
+        var previousContext = await BuildPreviousSceneContextAsync(project.Id, sceneNumber, cancellationToken);
+        var systemPrompt = _promptBuilder.BuildSingleScenePackageSystemPrompt();
+        var userPrompt = _promptBuilder.BuildSingleScenePackageUserPrompt(project, story, sceneNumber, previousContext);
+        var characters = await LoadStoryCharactersAsync(filmStoryId, cancellationToken);
+        var promptLength = systemPrompt.Length + userPrompt.Length;
+        var estimatedPromptTokens = EstimatePromptTokens(systemPrompt, userPrompt);
+        Report(progress, $"Sahne {sceneNumber}", $"Sahne {sceneNumber} hazirlaniyor. Model={_options.SceneTextModel}; Prompt={promptLength} karakter / ~{estimatedPromptTokens} token; Context={_options.ContextLength}; NumPredict={_options.SceneNumPredict}", sceneNumber - 1, project.CalculatedClipCount, null, GenerationLogLevel.Information, sceneNumber, sceneNumber);
+
+        var stopwatch = Stopwatch.StartNew();
+        var response = await GenerateWithOneRepairAsync<SingleScenePackageResponse>(
+            [new OllamaChatMessage("system", systemPrompt), new OllamaChatMessage("user", userPrompt)],
+            StoryJsonSchemas.SingleScenePackageSchema(),
+            progress,
+            $"Sahne {sceneNumber}",
+            cancellationToken,
+            _options.SceneTextModel,
+            new OllamaFailureContext(project.Id, sceneNumber, "SingleSceneGeneration"),
+            candidate => ValidateSingleSceneResponse(candidate, sceneNumber, project.ClipDurationSeconds));
+        stopwatch.Stop();
+        Report(progress, $"Sahne {sceneNumber}", $"Qwen cevabi alindi. Sure={stopwatch.Elapsed:mm\\:ss}", sceneNumber - 1, project.CalculatedClipCount, null, GenerationLogLevel.Success, sceneNumber, sceneNumber);
+
+        var scene = ConvertSingleScene(response);
+        ValidateScenePackageBatch([scene], sceneNumber, sceneNumber, characters, project.ClipDurationSeconds);
+        SanitizeSilentVideoPrompts([scene]);
+        ValidateSilentVideoPrompts([scene]);
+        Report(progress, $"Sahne {sceneNumber}", $"Sahne {sceneNumber} JSON ve alan dogrulamasi tamamlandi.", sceneNumber - 1, project.CalculatedClipCount, null, GenerationLogLevel.Success, sceneNumber, sceneNumber);
+        return scene;
+    }
+
+    public static int EstimatePromptTokens(params string[] prompts)
+    {
+        var characterCount = prompts.Sum(prompt => prompt?.Length ?? 0);
+        return Math.Max(1, (int)Math.Ceiling(characterCount / 4d));
+    }
+
+    private static IProgress<OllamaStreamProgress> CreateOllamaStreamProgress(
+        IProgress<StoryGenerationProgress>? progress,
+        string phase)
+    {
+        var lastChunkReport = DateTimeOffset.MinValue;
+        return new InlineProgress<OllamaStreamProgress>(stream =>
+        {
+            string? message = stream.Stage switch
+            {
+                OllamaStreamStage.RequestStarted => $"Qwen 30B istegi gonderildi. Model={stream.Model}",
+                OllamaStreamStage.ModelPreparing => "Model hazirlaniyor.",
+                OllamaStreamStage.FirstContentChunk => $"Ilk yanit parcasi {stream.Elapsed.TotalSeconds:0.0} saniyede alindi.",
+                OllamaStreamStage.ContentChunk when DateTimeOffset.UtcNow - lastChunkReport >= TimeSpan.FromSeconds(10) =>
+                    $"Yanit devam ediyor. Parca={stream.ContentChunkCount}; Son aktivite={stream.TimeSinceLastActivity.TotalSeconds:0.0} saniye once.",
+                OllamaStreamStage.ActivityHeartbeat =>
+                    $"Yanit bekleniyor. Son aktivite={stream.TimeSinceLastActivity.TotalSeconds:0.0} saniye once.",
+                OllamaStreamStage.Completed =>
+                    $"Cevap tamamlandi. Done={stream.Done}; DoneReason={stream.DoneReason}; Karakter={stream.ResponseCharacterCount}; Baslangic={(stream.LoadDuration > TimeSpan.FromSeconds(2) ? "cold" : "warm")}; Load={stream.LoadDuration.TotalSeconds:0.00}s; Eval={stream.EvaluationDuration.TotalSeconds:0.00}s; PromptToken={stream.PromptTokenCount}; ResponseToken={stream.ResponseTokenCount}; Parca={stream.ContentChunkCount}; Toplam={stream.Elapsed.TotalSeconds:0.00}s.",
+                OllamaStreamStage.JsonValidating => "JSON dogrulaniyor.",
+                _ => null
+            };
+
+            if (message is null)
+            {
+                return;
+            }
+
+            if (stream.Stage == OllamaStreamStage.ContentChunk)
+            {
+                lastChunkReport = DateTimeOffset.UtcNow;
+            }
+
+            Report(progress, phase, message, 0, 0, null, GenerationLogLevel.Information);
+        });
+    }
+
+    private static ScenePackageItemResponse ConvertSingleScene(SingleScenePackageResponse response)
+    {
+        var dialogue = ParseDialogueJson(response.DialogueJson);
+        return new ScenePackageItemResponse
+        {
+            SceneNumber = response.SceneNumber,
+            Title = response.Title,
+            StoryBeat = response.StoryBeat,
+            SceneDescription = response.SceneDescription,
+            LocationDescription = response.LocationDescription,
+            TimeOfDay = response.TimeOfDay,
+            Characters = response.Characters,
+            ContinuityFromPreviousScene = response.ContinuityFromPreviousScene,
+            ImagePrompt = response.ImagePrompt,
+            ImageNegativePrompt = response.ImageNegativePrompt,
+            VideoPrompt = response.VideoPrompt,
+            VideoNegativePrompt = response.VideoNegativePrompt,
+            NarrationText = string.Empty,
+            Dialogue = dialogue,
+            ValidationChecklist = response.ValidationChecklist
+        };
+    }
+
+    private static List<DialogueLineResponse> ParseDialogueJson(string dialogueJson)
+    {
+        if (string.IsNullOrWhiteSpace(dialogueJson) || dialogueJson.Trim() == "[]")
+        {
+            return [];
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(dialogueJson);
+            return document.RootElement.ValueKind switch
+            {
+                JsonValueKind.Array => JsonSerializer.Deserialize<List<DialogueLineResponse>>(dialogueJson, JsonOptions)
+                    ?? throw new InvalidOperationException("DialogueJson array deserialize edilemedi."),
+                JsonValueKind.Object =>
+                    [JsonSerializer.Deserialize<DialogueLineResponse>(dialogueJson, JsonOptions)
+                        ?? throw new InvalidOperationException("DialogueJson object deserialize edilemedi.")],
+                _ => throw new InvalidOperationException("DialogueJson root degeri object veya array olmali.")
+            };
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException("DialogueJson gecerli JSON degil.", ex);
+        }
+    }
+
+    private static void ValidateSingleSceneResponse(
+        SingleScenePackageResponse response,
+        int expectedSceneNumber,
+        int expectedDurationSeconds)
+    {
+        var errors = new List<string>();
+        if (response.SceneNumber != expectedSceneNumber) errors.Add($"sceneNumber expected {expectedSceneNumber}, actual {response.SceneNumber}");
+        if (response.DurationSeconds != expectedDurationSeconds) errors.Add($"durationSeconds expected {expectedDurationSeconds}, actual {response.DurationSeconds}");
+        AddRequired(response.Title, "title", errors);
+        AddRequired(response.StoryBeat, "storyBeat", errors);
+        AddRequired(response.SceneDescription, "sceneDescription", errors);
+        AddRequired(response.LocationDescription, "locationDescription", errors);
+        AddRequired(response.TimeOfDay, "timeOfDay", errors);
+        AddRequired(response.ImagePrompt, "imagePrompt", errors);
+        AddRequired(response.ImageNegativePrompt, "imageNegativePrompt", errors);
+        AddRequired(response.VideoPrompt, "videoPrompt", errors);
+        AddRequired(response.VideoNegativePrompt, "videoNegativePrompt", errors);
+        AddRequired(response.ContinuityFromPreviousScene, "continuityFromPreviousScene", errors);
+        AddMaxLength(response.Title, "title", 120, errors);
+        AddMaxLength(response.TimeOfDay, "timeOfDay", 120, errors);
+        AddMaxLength(response.StoryBeat, "storyBeat", 900, errors);
+        AddMaxLength(response.SceneDescription, "sceneDescription", 900, errors);
+        AddMaxLength(response.LocationDescription, "locationDescription", 900, errors);
+        AddMaxLength(response.ImagePrompt, "imagePrompt", 900, errors);
+        AddMaxLength(response.ImageNegativePrompt, "imageNegativePrompt", 900, errors);
+        AddMaxLength(response.VideoPrompt, "videoPrompt", 900, errors);
+        AddMaxLength(response.VideoNegativePrompt, "videoNegativePrompt", 900, errors);
+        AddMaxLength(response.NarrationText, "narrationText", 900, errors);
+        AddMaxLength(response.DialogueJson, "dialogueJson", 900, errors);
+        AddMaxLength(response.ContinuityFromPreviousScene, "continuityFromPreviousScene", 900, errors);
+        if (response.Characters is null) errors.Add("characters is null");
+        if (response.ValidationChecklist is null) errors.Add("validationChecklist is null");
+        if (string.IsNullOrWhiteSpace(response.DialogueJson))
+        {
+            errors.Add("dialogueJson is empty");
+        }
+        else
+        {
+            try
+            {
+                _ = ParseDialogueJson(response.DialogueJson);
+            }
+            catch (InvalidOperationException ex)
+            {
+                errors.Add(ex.Message);
+            }
+        }
+
+        if (errors.Count > 0)
+        {
+            throw new InvalidOperationException(string.Join(" | ", errors));
+        }
+    }
+
+    private static void AddRequired(string? value, string fieldName, ICollection<string> errors)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            errors.Add($"{fieldName} is empty");
+        }
+    }
+
+    private static void AddMaxLength(string? value, string fieldName, int maxLength, ICollection<string> errors)
+    {
+        if (value?.Length > maxLength)
+        {
+            errors.Add($"{fieldName} exceeds {maxLength} characters");
+        }
+    }
+
+    private async Task<List<SceneOutlineItemDto>> GenerateOutlinesForRangeWithTimeoutRetryAsync(
+        FilmProject project,
+        FilmStory story,
+        int start,
+        int end,
+        IProgress<StoryGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            var attemptStarted = DateTime.Now;
+            try
+            {
+                var outlines = await GenerateOutlinesForRangeAsync(project, story, start, end, progress, cancellationToken);
+                Report(progress, $"Sahne plani {start}-{end}", $"Sahne plani alindi. Deneme={attempt}; Gecen sure={(DateTime.Now - attemptStarted):mm\\:ss}", 0, project.CalculatedClipCount, null, GenerationLogLevel.Success, start, end);
+                return outlines;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && attempt == 1)
+            {
+                Report(progress, $"Sahne plani {start}-{end}", "Sahne plani istegi timeout oldu; bir kez daha deneniyor.", 0, project.CalculatedClipCount, null, GenerationLogLevel.Warning, start, end);
+            }
+            catch (TimeoutException) when (attempt == 1)
+            {
+                Report(progress, $"Sahne plani {start}-{end}", "Sahne plani istegi timeout oldu; bir kez daha deneniyor.", 0, project.CalculatedClipCount, null, GenerationLogLevel.Warning, start, end);
+            }
+        }
+
+        throw new TimeoutException($"Sahne plani {start}-{end} timeout nedeniyle tamamlanamadi.");
+    }
+
+    private async Task<ScenePackageBatchResponse> GenerateScenePackageWithTimeoutRetryAsync(
+        FilmProject project,
+        IReadOnlyList<OllamaChatMessage> messages,
+        int start,
+        int end,
+        IProgress<StoryGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            var attemptStarted = DateTime.Now;
+            try
+            {
+                var response = await GenerateWithOneRepairAsync<ScenePackageBatchResponse>(
+                    messages,
+                    StoryJsonSchemas.ScenePackageBatchSchema(),
+                    progress,
+                    $"Sahne paketi {start}-{end}",
+                    cancellationToken,
+                    gpuProjectId: project.Id,
+                    gpuSceneId: start);
+                Report(progress, $"Sahne paketi {start}-{end}", $"Qwen cevabi alindi. Deneme={attempt}; Gecen sure={(DateTime.Now - attemptStarted):mm\\:ss}", 0, project.CalculatedClipCount, null, GenerationLogLevel.Success, start, end);
+                return response;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && attempt == 1)
+            {
+                Report(progress, $"Sahne paketi {start}-{end}", "Paket istegi timeout oldu; bir kez daha deneniyor.", 0, project.CalculatedClipCount, null, GenerationLogLevel.Warning, start, end);
+            }
+            catch (TimeoutException) when (attempt == 1)
+            {
+                Report(progress, $"Sahne paketi {start}-{end}", "Paket istegi timeout oldu; bir kez daha deneniyor.", 0, project.CalculatedClipCount, null, GenerationLogLevel.Warning, start, end);
+            }
+        }
+
+        throw new TimeoutException($"Sahne paketi {start}-{end} timeout nedeniyle tamamlanamadi.");
+    }
+
     private async Task<FilmStory> LoadStorySnapshotAsync(int filmStoryId, CancellationToken cancellationToken)
     {
         await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
         return await db.FilmStories
             .AsNoTracking()
+            .Include(story => story.Characters)
             .FirstAsync(story => story.Id == filmStoryId, cancellationToken);
     }
 
-    private async Task SaveSceneBatchAsync(
+    private async Task<List<StoryCharacter>> LoadStoryCharactersAsync(int filmStoryId, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        return await db.StoryCharacters
+            .AsNoTracking()
+            .Where(item => item.FilmStoryId == filmStoryId)
+            .OrderBy(item => item.SortOrder)
+            .ToListAsync(cancellationToken);
+    }
+
+    private async Task<string> BuildPreviousSceneContextAsync(int filmProjectId, int startScene, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var previous = await db.FilmScenes
+            .AsNoTracking()
+            .Where(item => item.FilmProjectId == filmProjectId && item.SceneNumber < startScene)
+            .OrderByDescending(item => item.SceneNumber)
+            .Take(1)
+            .OrderBy(item => item.SceneNumber)
+            .Select(item => $"{item.SceneNumber}. {item.Title} | {item.StoryBeat} | continuity: {item.ContinuityFromPreviousScene}")
+            .ToListAsync(cancellationToken);
+        return string.Join(Environment.NewLine, previous);
+    }
+
+    private async Task<bool> SceneExistsAsync(int filmProjectId, int sceneNumber, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        return await db.FilmScenes.AsNoTracking().AnyAsync(item => item.FilmProjectId == filmProjectId && item.SceneNumber == sceneNumber, cancellationToken);
+    }
+
+    private async Task<HashSet<int>> SaveSceneBatchAsync(
         FilmProject project,
         int filmStoryId,
         IReadOnlyList<ScenePackageItemResponse> scenes,
@@ -346,18 +1173,20 @@ public sealed class StoryGenerationService : IStoryGenerationService
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
 
         var sceneNumbers = scenes.Select(scene => scene.SceneNumber).ToList();
-        var existingScenes = await db.FilmScenes
+        var existingSceneNumbers = await db.FilmScenes
             .Where(scene => scene.FilmProjectId == project.Id && sceneNumbers.Contains(scene.SceneNumber))
+            .Select(scene => scene.SceneNumber)
             .ToListAsync(cancellationToken);
-
-        if (existingScenes.Count > 0)
-        {
-            db.FilmScenes.RemoveRange(existingScenes);
-            await db.SaveChangesAsync(cancellationToken);
-        }
+        var existingSet = existingSceneNumbers.ToHashSet();
+        var inserted = new HashSet<int>();
 
         foreach (var scene in scenes)
         {
+            if (existingSet.Contains(scene.SceneNumber))
+            {
+                continue;
+            }
+
             db.FilmScenes.Add(new FilmScene
             {
                 FilmProjectId = project.Id,
@@ -375,17 +1204,66 @@ public sealed class StoryGenerationService : IStoryGenerationService
                 ImageNegativePrompt = scene.ImageNegativePrompt.Trim(),
                 VideoPrompt = scene.VideoPrompt.Trim(),
                 VideoNegativePrompt = scene.VideoNegativePrompt.Trim(),
-                NarrationText = scene.NarrationText.Trim(),
+                NarrationText = string.Empty,
                 DialogueJson = JsonSerializer.Serialize(scene.Dialogue, JsonOptions),
                 ValidationChecklistJson = JsonSerializer.Serialize(scene.ValidationChecklist, JsonOptions),
                 Status = FilmSceneStatus.PromptReady,
                 CreatedAt = DateTime.Now
             });
+            inserted.Add(scene.SceneNumber);
         }
 
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return inserted;
+        }
+        catch (DbUpdateException ex) when (IsFilmSceneProjectSceneNumberUniqueViolation(ex))
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            await using var reloadDb = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+            var concurrentlyCompleted = await reloadDb.FilmScenes
+                .AsNoTracking()
+                .Where(scene => scene.FilmProjectId == project.Id && sceneNumbers.Contains(scene.SceneNumber))
+                .Select(scene => scene.SceneNumber)
+                .ToListAsync(cancellationToken);
+            var completion = ClassifyConcurrentSceneCompletion(sceneNumbers, concurrentlyCompleted);
+            if (completion.Count == 0)
+            {
+                throw;
+            }
+
+            _logger.LogInformation(
+                "Concurrent scene completion detected after unique constraint violation. FilmProjectId={FilmProjectId}; SceneNumbers={SceneNumbers}",
+                project.Id,
+                string.Join(',', completion.OrderBy(item => item)));
+            return completion;
+        }
     }
+
+    internal static bool IsFilmSceneProjectSceneNumberUniqueViolation(DbUpdateException exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sqlException &&
+                IsFilmSceneProjectSceneNumberUniqueViolation(sqlException.Number, sqlException.Message))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    internal static bool IsFilmSceneProjectSceneNumberUniqueViolation(int sqlErrorNumber, string message) =>
+        sqlErrorNumber is 2601 or 2627 &&
+        message.Contains("IX_FilmScenes_FilmProjectId_SceneNumber", StringComparison.OrdinalIgnoreCase);
+
+    internal static HashSet<int> ClassifyConcurrentSceneCompletion(
+        IEnumerable<int> requestedSceneNumbers,
+        IEnumerable<int> reloadedSceneNumbers) =>
+        requestedSceneNumbers.Intersect(reloadedSceneNumbers).ToHashSet();
 
     private async Task UpdateProjectStatusAsync(int filmProjectId, FilmProjectStatus status, CancellationToken cancellationToken)
     {
@@ -428,6 +1306,8 @@ public sealed class StoryGenerationService : IStoryGenerationService
         {
             throw new InvalidOperationException($"Tekrarlanan karakter anahtari uretildi: {duplicateCharacter.Key}");
         }
+
+        StoryCharacterFieldValidator.Validate(bible);
     }
 
     private static void ValidateSceneNumbers(IEnumerable<int> sceneNumbers, int start, int end, string label)
@@ -438,6 +1318,97 @@ public sealed class StoryGenerationService : IStoryGenerationService
         {
             throw new InvalidOperationException($"{label} beklenen sahne numaralarini uretmedi. Beklenen: {start}-{end}.");
         }
+    }
+
+    private static void ValidateScenePackageBatch(
+        IReadOnlyList<ScenePackageItemResponse> scenes,
+        int start,
+        int end,
+        IReadOnlyList<StoryCharacter> characters,
+        int durationSeconds)
+    {
+        if (durationSeconds != 10)
+        {
+            throw new InvalidOperationException("Sahne paketleri 10 saniyelik klipler icin uretilmelidir.");
+        }
+
+        if (scenes.Count != end - start + 1)
+        {
+            throw new InvalidOperationException($"Sahne paketi {start}-{end} beklenen {end - start + 1} sahneyi dondurmedi.");
+        }
+
+        ValidateSceneNumbers(scenes.Select(scene => scene.SceneNumber), start, end, "Sahne paketi");
+        var characterKeys = characters.Select(item => item.CharacterKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var scene in scenes)
+        {
+            if (string.IsNullOrWhiteSpace(scene.ImagePrompt))
+            {
+                throw new InvalidOperationException($"{scene.SceneNumber}. sahnenin ImagePrompt alani bos.");
+            }
+
+            if (string.IsNullOrWhiteSpace(scene.VideoPrompt))
+            {
+                throw new InvalidOperationException($"{scene.SceneNumber}. sahnenin VideoPrompt alani bos.");
+            }
+
+            if (string.IsNullOrWhiteSpace(scene.ContinuityFromPreviousScene))
+            {
+                throw new InvalidOperationException($"{scene.SceneNumber}. sahnenin continuity alani bos.");
+            }
+
+            foreach (var line in scene.Dialogue)
+            {
+                if (!string.IsNullOrWhiteSpace(line.CharacterKey) && !characterKeys.Contains(line.CharacterKey))
+                {
+                    throw new InvalidOperationException($"{scene.SceneNumber}. sahnede StoryCharacter ile eslesmeyen speakerKey var.");
+                }
+            }
+        }
+    }
+
+    public static int FindFirstMissingScene(IReadOnlySet<int> existingSceneNumbers, int totalSceneCount)
+    {
+        for (var sceneNumber = 1; sceneNumber <= totalSceneCount; sceneNumber++)
+        {
+            if (!existingSceneNumbers.Contains(sceneNumber))
+            {
+                return sceneNumber;
+            }
+        }
+
+        return totalSceneCount + 1;
+    }
+
+    public static int GetBatchStart(int sceneNumber)
+    {
+        return ((Math.Max(1, sceneNumber) - 1) / ResumeSceneBatchSize) * ResumeSceneBatchSize + 1;
+    }
+
+    public static string? TryGetCompletionError(IReadOnlySet<int> sceneNumbers, int totalDurationSeconds, int totalSceneCount, int clipDurationSeconds)
+    {
+        var expected = Enumerable.Range(1, totalSceneCount).ToHashSet();
+        if (sceneNumbers.Count != totalSceneCount || !expected.SetEquals(sceneNumbers))
+        {
+            return "FilmScenes 1-30 arasi eksiksiz degil.";
+        }
+
+        var expectedDuration = totalSceneCount * clipDurationSeconds;
+        if (totalDurationSeconds != expectedDuration)
+        {
+            return $"Toplam sahne suresi beklenen degerde degil. Beklenen={expectedDuration}; Gercek={totalDurationSeconds}.";
+        }
+
+        return null;
+    }
+
+    private static double ProgressFor(int sceneCount, int totalSceneCount)
+    {
+        return totalSceneCount <= 0 ? 0 : Math.Min(99, 10 + sceneCount * 85d / totalSceneCount);
+    }
+
+    private sealed class InlineProgress<T>(Action<T> handler) : IProgress<T>
+    {
+        public void Report(T value) => handler(value);
     }
 
     private static void ValidateSilentVideoPrompts(IEnumerable<ScenePackageItemResponse> scenes)
@@ -526,3 +1497,10 @@ public sealed class StoryGenerationService : IStoryGenerationService
         });
     }
 }
+
+internal sealed record StoryResumeState(
+    FilmStory? Story,
+    int CharacterCount,
+    HashSet<int> SceneNumbers,
+    int TotalDurationSeconds,
+    int DuplicateSceneGroups);

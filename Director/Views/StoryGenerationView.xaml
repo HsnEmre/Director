@@ -54,7 +54,7 @@
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button Content="Ollama Bağlantısını Test Et" Command="{Binding TestOllamaCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,10,0" />
-                    <Button Content="Hikaye ve Sahne Planını Oluştur" Command="{Binding GenerateStoryCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,10,0" />
+                    <Button Content="Hikaye Uret / Devam Et" Command="{Binding GenerateStoryCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,10,0" />
                     <Button Content="Görsel Üretimine Geç" Command="{Binding GoToProductionCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,10,0" />
                     <Button Content="İşlemi İptal Et" Command="{Binding CancelCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,10,0" />
                     <Button Content="Proje Ayarlarına Dön" Command="{Binding BackCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,10,0" />

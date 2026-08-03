@@ -22,6 +22,111 @@ namespace Director.Migrations
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
 
+            modelBuilder.Entity("Director.Models.CharacterVoiceProfile", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<double?>("CfgScale")
+                        .HasColumnType("float");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETDATE()");
+
+                    b.Property<bool>("DoSample")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("EmotionStyle")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<int>("FilmProjectId")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("IsDefault")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsLocked")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsNarrator")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Language")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<int?>("MaxNewTokens")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ModelType")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("nvarchar(160)");
+
+                    b.Property<string>("ProfileName")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("nvarchar(160)");
+
+                    b.Property<int>("Provider")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("Seed")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SettingsHash")
+                        .IsRequired()
+                        .HasMaxLength(96)
+                        .HasColumnType("nvarchar(96)");
+
+                    b.Property<double>("SpeakingRate")
+                        .HasColumnType("float");
+
+                    b.Property<int?>("StoryCharacterId")
+                        .HasColumnType("int");
+
+                    b.Property<double?>("Temperature")
+                        .HasColumnType("float");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("UseEmotionStyling")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("VoicePresetDisplayName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("VoicePresetKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("nvarchar(160)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("StoryCharacterId");
+
+                    b.HasIndex("FilmProjectId", "IsNarrator", "IsDefault");
+
+                    b.HasIndex("FilmProjectId", "StoryCharacterId", "IsDefault");
+
+                    b.HasIndex("FilmProjectId", "StoryCharacterId", "IsDefault", "IsLocked")
+                        .IsUnique()
+                        .HasFilter("[StoryCharacterId] IS NOT NULL AND [IsDefault] = 1 AND [IsLocked] = 1");
+
+                    b.ToTable("CharacterVoiceProfiles");
+                });
+
             modelBuilder.Entity("Director.Models.FilmProject", b =>
                 {
                     b.Property<int>("Id")
@@ -382,6 +487,85 @@ namespace Director.Migrations
                     b.ToTable("GenerationJobs");
                 });
 
+            modelBuilder.Entity("Director.Models.LtxNativeVoiceProfile", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("AccentDescription")
+                        .IsRequired()
+                        .HasMaxLength(180)
+                        .HasColumnType("nvarchar(180)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETDATE()");
+
+                    b.Property<int>("FilmProjectId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("GenderPresentation")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("nvarchar(80)");
+
+                    b.Property<bool>("IsLocked")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Language")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<string>("PerceivedAge")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("nvarchar(80)");
+
+                    b.Property<string>("PitchDescription")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<string>("SettingsHash")
+                        .IsRequired()
+                        .HasMaxLength(96)
+                        .HasColumnType("nvarchar(96)");
+
+                    b.Property<string>("SpeakingStyle")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("nvarchar(160)");
+
+                    b.Property<int>("StoryCharacterId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("TempoDescription")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("VoiceDescription")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("StoryCharacterId");
+
+                    b.HasIndex("FilmProjectId", "StoryCharacterId")
+                        .IsUnique();
+
+                    b.ToTable("LtxNativeVoiceProfiles");
+                });
+
             modelBuilder.Entity("Director.Models.SceneMediaAsset", b =>
                 {
                     b.Property<int>("Id")
@@ -445,6 +629,11 @@ namespace Director.Migrations
                         .HasMaxLength(260)
                         .HasColumnType("nvarchar(260)");
 
+                    b.Property<int>("Role")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0);
+
                     b.Property<int>("SceneId")
                         .HasColumnType("int");
 
@@ -474,6 +663,116 @@ namespace Director.Migrations
                     b.HasIndex("SceneId", "MediaType", "IsSelected");
 
                     b.ToTable("SceneMediaAssets");
+                });
+
+            modelBuilder.Entity("Director.Models.SceneSpeechPlan", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETDATE()");
+
+                    b.Property<int>("FilmProjectId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SceneId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("int");
+
+                    b.Property<int>("TargetDurationSeconds")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("FilmProjectId");
+
+                    b.HasIndex("SceneId")
+                        .IsUnique();
+
+                    b.ToTable("SceneSpeechPlans");
+                });
+
+            modelBuilder.Entity("Director.Models.SceneSpeechSegment", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<double?>("ActualDurationSeconds")
+                        .HasColumnType("float");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("GETDATE()");
+
+                    b.Property<string>("Emotion")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<int>("SceneSpeechPlanId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SourceText")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("SpeakerKey")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<int>("SpeakerType")
+                        .HasColumnType("int");
+
+                    b.Property<double>("StartTimeSeconds")
+                        .HasColumnType("float");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("StoryCharacterId")
+                        .HasColumnType("int");
+
+                    b.Property<double>("TargetDurationSeconds")
+                        .HasColumnType("float");
+
+                    b.Property<string>("TurkishText")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("VoiceProfileId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("StoryCharacterId");
+
+                    b.HasIndex("VoiceProfileId");
+
+                    b.HasIndex("SceneSpeechPlanId", "SortOrder");
+
+                    b.ToTable("SceneSpeechSegments");
                 });
 
             modelBuilder.Entity("Director.Models.StoryCharacter", b =>
@@ -537,6 +836,24 @@ namespace Director.Migrations
                     b.ToTable("StoryCharacters");
                 });
 
+            modelBuilder.Entity("Director.Models.CharacterVoiceProfile", b =>
+                {
+                    b.HasOne("Director.Models.FilmProject", "FilmProject")
+                        .WithMany()
+                        .HasForeignKey("FilmProjectId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Director.Models.StoryCharacter", "StoryCharacter")
+                        .WithMany()
+                        .HasForeignKey("StoryCharacterId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
+                    b.Navigation("FilmProject");
+
+                    b.Navigation("StoryCharacter");
+                });
+
             modelBuilder.Entity("Director.Models.FilmScene", b =>
                 {
                     b.HasOne("Director.Models.FilmProject", "FilmProject")
@@ -593,6 +910,25 @@ namespace Director.Migrations
                     b.Navigation("SourceMediaAsset");
                 });
 
+            modelBuilder.Entity("Director.Models.LtxNativeVoiceProfile", b =>
+                {
+                    b.HasOne("Director.Models.FilmProject", "FilmProject")
+                        .WithMany()
+                        .HasForeignKey("FilmProjectId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Director.Models.StoryCharacter", "StoryCharacter")
+                        .WithMany()
+                        .HasForeignKey("StoryCharacterId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.Navigation("FilmProject");
+
+                    b.Navigation("StoryCharacter");
+                });
+
             modelBuilder.Entity("Director.Models.SceneMediaAsset", b =>
                 {
                     b.HasOne("Director.Models.FilmProject", "FilmProject")
@@ -625,6 +961,51 @@ namespace Director.Migrations
                     b.Navigation("Scene");
 
                     b.Navigation("SourceMediaAsset");
+                });
+
+            modelBuilder.Entity("Director.Models.SceneSpeechPlan", b =>
+                {
+                    b.HasOne("Director.Models.FilmProject", "FilmProject")
+                        .WithMany()
+                        .HasForeignKey("FilmProjectId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.HasOne("Director.Models.FilmScene", "Scene")
+                        .WithOne()
+                        .HasForeignKey("Director.Models.SceneSpeechPlan", "SceneId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("FilmProject");
+
+                    b.Navigation("Scene");
+                });
+
+            modelBuilder.Entity("Director.Models.SceneSpeechSegment", b =>
+                {
+                    b.HasOne("Director.Models.SceneSpeechPlan", "SceneSpeechPlan")
+                        .WithMany("Segments")
+                        .HasForeignKey("SceneSpeechPlanId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Director.Models.StoryCharacter", "StoryCharacter")
+                        .WithMany()
+                        .HasForeignKey("StoryCharacterId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
+                    b.HasOne("Director.Models.CharacterVoiceProfile", "VoiceProfile")
+                        .WithMany()
+                        .HasForeignKey("VoiceProfileId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.Navigation("SceneSpeechPlan");
+
+                    b.Navigation("StoryCharacter");
+
+                    b.Navigation("VoiceProfile");
                 });
 
             modelBuilder.Entity("Director.Models.StoryCharacter", b =>
@@ -666,6 +1047,11 @@ namespace Director.Migrations
             modelBuilder.Entity("Director.Models.GenerationJob", b =>
                 {
                     b.Navigation("Assets");
+                });
+
+            modelBuilder.Entity("Director.Models.SceneSpeechPlan", b =>
+                {
+                    b.Navigation("Segments");
                 });
 #pragma warning restore 612, 618
         }

@@ -8,4 +8,20 @@ public interface IStoryGenerationService
         int filmProjectId,
         IProgress<StoryGenerationProgress>? progress = null,
         CancellationToken cancellationToken = default);
+
+    Task<StoryGenerationProgressResult> GenerateAllMissingScenesAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    Task<StoryGenerationProgressResult> GenerateNextMissingSceneAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    Task<StoryGenerationProgressResult> GenerateUpToMissingScenesAsync(
+        int filmProjectId,
+        int maximumSceneCount,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default);
 }

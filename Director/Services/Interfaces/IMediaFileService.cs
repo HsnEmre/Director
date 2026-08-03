@@ -1,4 +1,5 @@
 using Director.Models;
+using Director.Enums;
 using Director.WanGp;
 
 namespace Director.Services.Interfaces;
@@ -31,5 +32,15 @@ public interface IMediaFileService
         bool isSelected,
         int sourceImageAssetId,
         string? fallbackThumbnailPath = null,
+        CancellationToken cancellationToken = default);
+
+    Task<SceneMediaAsset> CopyGeneratedAudioAsync(
+        FilmScene scene,
+        GenerationJob job,
+        string sourcePath,
+        VideoMetadata metadata,
+        int versionNumber,
+        MediaAssetRole role,
+        string metadataJson,
         CancellationToken cancellationToken = default);
 }

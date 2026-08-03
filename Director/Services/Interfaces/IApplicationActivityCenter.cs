@@ -15,6 +15,7 @@ public interface IApplicationActivityCenter
     void UpdateProgress(double progress, string phase, int? currentStep = null, int? totalSteps = null);
     void CompleteOperation(GenerationJobStatus status, string message);
     void AddLog(string phase, string message, GenerationLogLevel level = GenerationLogLevel.Information);
+    void ClearLogs();
     void SetModelDiscoveryStatus(string status);
     void SetError(string message);
 }

@@ -5,9 +5,11 @@ using Director.Data;
 using Director.Dtos.MediaGeneration;
 using Director.Enums;
 using Director.Ollama;
+using Director.Options;
 using Director.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Director.Services;
 
@@ -20,15 +22,21 @@ public sealed class VideoPromptComposerService : IVideoPromptComposerService
 
     private readonly IDbContextFactory<AppDbContext> _dbContextFactory;
     private readonly IOllamaClient _ollamaClient;
+    private readonly OllamaOptions _options;
     private readonly ILogger<VideoPromptComposerService> _logger;
+    private readonly IGpuGenerationCoordinator _gpuCoordinator;
 
     public VideoPromptComposerService(
         IDbContextFactory<AppDbContext> dbContextFactory,
         IOllamaClient ollamaClient,
+        IGpuGenerationCoordinator gpuCoordinator,
+        IOptions<OllamaOptions> options,
         ILogger<VideoPromptComposerService> logger)
     {
         _dbContextFactory = dbContextFactory;
         _ollamaClient = ollamaClient;
+        _gpuCoordinator = gpuCoordinator;
+        _options = options.Value;
         _logger = logger;
     }
 
@@ -110,7 +118,16 @@ public sealed class VideoPromptComposerService : IVideoPromptComposerService
             new("user", BuildUserPrompt(request), [imageBase64])
         };
 
-        var result = await _ollamaClient.ChatStructuredAsync<VideoPromptCompositionResult>(messages, BuildJsonSchema(), cancellationToken);
+        await using var gpuLease = await _gpuCoordinator.AcquireAsync(
+            GenerationOperationType.OllamaText,
+            request.FilmProjectId,
+            request.SceneId,
+            cancellationToken);
+        var result = await _ollamaClient.ChatStructuredAsync<VideoPromptCompositionResult>(
+            messages,
+            BuildJsonSchema(),
+            _options.VideoPromptModel,
+            cancellationToken: cancellationToken);
         ValidateResult(result);
         return result;
     }

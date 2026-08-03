@@ -94,6 +94,18 @@ public sealed class WanGpVideoGenerationRequest
     public int? Seed { get; set; }
     public bool RandomSeed { get; set; }
     public string InputMode { get; set; } = "start";
+    public VideoAudioGenerationMode GenerationMode { get; set; } = VideoAudioGenerationMode.SilentVideo;
+    public string DialogueSourceHash { get; set; } = string.Empty;
+    public List<string> ExactSpokenLines { get; set; } = [];
+    public List<int> CharacterVoiceProfileIds { get; set; } = [];
+    public List<string> VoiceSettingsHashes { get; set; } = [];
+    public int DialogueCount { get; set; }
+    public int SpeakerCount { get; set; }
+    public string CanonicalModelType { get; set; } = string.Empty;
+    public bool NativeDialogueCapabilitySupported { get; set; }
+    public string NativeDialogueCapabilityFailureReason { get; set; } = string.Empty;
+    public List<string> NativeDialogueCapabilityEvidence { get; set; } = [];
     public bool StopOnFailure { get; set; }
+    public WanGpVideoInputContract? InputContract { get; set; }
     public Dictionary<string, object?> SettingsPatch { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }

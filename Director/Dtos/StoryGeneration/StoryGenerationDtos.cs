@@ -1,4 +1,5 @@
 using Director.Enums;
+using System.Text.Json.Serialization;
 
 namespace Director.Dtos.StoryGeneration;
 
@@ -50,6 +51,42 @@ public sealed class SceneOutlineItemResponse
 public sealed class ScenePackageBatchResponse
 {
     public List<ScenePackageItemResponse> Scenes { get; set; } = new();
+}
+
+public sealed class SingleScenePackageResponse
+{
+    [JsonRequired]
+    public int SceneNumber { get; set; }
+    [JsonRequired]
+    public int DurationSeconds { get; set; }
+    [JsonRequired]
+    public string Title { get; set; } = string.Empty;
+    [JsonRequired]
+    public string StoryBeat { get; set; } = string.Empty;
+    [JsonRequired]
+    public string SceneDescription { get; set; } = string.Empty;
+    [JsonRequired]
+    public string LocationDescription { get; set; } = string.Empty;
+    [JsonRequired]
+    public string TimeOfDay { get; set; } = string.Empty;
+    [JsonRequired]
+    public List<string> Characters { get; set; } = new();
+    [JsonRequired]
+    public string ContinuityFromPreviousScene { get; set; } = string.Empty;
+    [JsonRequired]
+    public string ImagePrompt { get; set; } = string.Empty;
+    [JsonRequired]
+    public string ImageNegativePrompt { get; set; } = string.Empty;
+    [JsonRequired]
+    public string VideoPrompt { get; set; } = string.Empty;
+    [JsonRequired]
+    public string VideoNegativePrompt { get; set; } = string.Empty;
+    [JsonRequired]
+    public string NarrationText { get; set; } = string.Empty;
+    [JsonRequired]
+    public string DialogueJson { get; set; } = string.Empty;
+    [JsonRequired]
+    public List<string> ValidationChecklist { get; set; } = new();
 }
 
 public sealed class ScenePackageItemResponse

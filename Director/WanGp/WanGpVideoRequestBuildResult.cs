@@ -11,4 +11,14 @@ public sealed class WanGpVideoRequestBuildResult
     public bool SupportsFps { get; set; }
     public bool SupportsFrameCount { get; set; }
     public string ImageInputKey { get; set; } = string.Empty;
+    public string InputModeKey { get; set; } = string.Empty;
+    public string InputModeValue { get; set; } = string.Empty;
+    public WanGpVideoInputContract? InputContract { get; set; }
+    public WanGpVideoTimingContract? TimingContract { get; set; }
+    public bool NativeAudioRequired { get; set; }
+    public bool NativeAudioDisabledByRequest { get; set; }
+    public bool HasStartImage => !string.IsNullOrWhiteSpace(ImageInputKey) &&
+        Source.TryGetValue(ImageInputKey, out var value) &&
+        value is not null &&
+        !string.IsNullOrWhiteSpace(value.ToString());
 }

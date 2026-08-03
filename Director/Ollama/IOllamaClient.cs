@@ -9,5 +9,18 @@ public interface IOllamaClient
     Task<TResponse> ChatStructuredAsync<TResponse>(
         IReadOnlyList<OllamaChatMessage> messages,
         object jsonSchema,
-        CancellationToken cancellationToken = default);
+        string? modelOverride = null,
+        TimeSpan? requestTimeout = null,
+        CancellationToken cancellationToken = default,
+        IProgress<OllamaStreamProgress>? streamProgress = null,
+        OllamaGenerationSettings? generationSettings = null);
+
+    Task<OllamaStructuredResult<TResponse>> ChatStructuredDetailedAsync<TResponse>(
+        IReadOnlyList<OllamaChatMessage> messages,
+        object jsonSchema,
+        string? modelOverride = null,
+        TimeSpan? requestTimeout = null,
+        CancellationToken cancellationToken = default,
+        IProgress<OllamaStreamProgress>? streamProgress = null,
+        OllamaGenerationSettings? generationSettings = null);
 }

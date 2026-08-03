@@ -14,6 +14,7 @@ public sealed class SceneMediaAsset
     public int? SourceMediaAssetId { get; set; }
     public SceneMediaAsset? SourceMediaAsset { get; set; }
     public MediaType MediaType { get; set; }
+    public MediaAssetRole Role { get; set; }
     public string FilePath { get; set; } = string.Empty;
     public string? ThumbnailPath { get; set; }
     public string OriginalFileName { get; set; } = string.Empty;

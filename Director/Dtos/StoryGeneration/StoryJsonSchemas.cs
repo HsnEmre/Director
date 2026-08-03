@@ -29,11 +29,11 @@ public static class StoryJsonSchemas
                     required = new[] { "characterKey", "name", "role", "physicalDescription", "clothingDescription", "personalityDescription", "voiceDescription", "continuityDescription", "forbiddenChanges" },
                     properties = new Dictionary<string, object>
                     {
-                        ["characterKey"] = StringSchema(),
-                        ["name"] = StringSchema(),
-                        ["role"] = StringSchema(),
-                        ["physicalDescription"] = StringSchema(),
-                        ["clothingDescription"] = StringSchema(),
+                        ["characterKey"] = StringSchema(80, "Stable lowercase identifier such as metehan or commander_1."),
+                        ["name"] = StringSchema(160, "Character display name."),
+                        ["role"] = RoleSchema(),
+                        ["physicalDescription"] = StringSchema(null, "Appearance only: face, body, age, hair, eyes and other physical traits."),
+                        ["clothingDescription"] = StringSchema(null, "Clothing and equipment only: garments, armor, accessories, weapons and carried items."),
                         ["personalityDescription"] = StringSchema(),
                         ["voiceDescription"] = StringSchema(),
                         ["continuityDescription"] = StringSchema(),
@@ -128,7 +128,57 @@ public static class StoryJsonSchemas
         }
     };
 
-    private static object StringSchema() => new { type = "string" };
+    public static object SingleScenePackageSchema() => new
+    {
+        type = "object",
+        additionalProperties = false,
+        required = new[] { "sceneNumber", "durationSeconds", "title", "storyBeat", "sceneDescription", "locationDescription", "timeOfDay", "characters", "imagePrompt", "imageNegativePrompt", "videoPrompt", "videoNegativePrompt", "narrationText", "dialogueJson", "continuityFromPreviousScene", "validationChecklist" },
+        properties = new Dictionary<string, object>
+        {
+            ["sceneNumber"] = new { type = "integer" },
+            ["durationSeconds"] = new { type = "integer" },
+            ["title"] = StringSchema(),
+            ["storyBeat"] = StringSchema(),
+            ["sceneDescription"] = StringSchema(),
+            ["locationDescription"] = StringSchema(),
+            ["timeOfDay"] = StringSchema(),
+            ["characters"] = StringArraySchema(),
+            ["imagePrompt"] = StringSchema(),
+            ["imageNegativePrompt"] = StringSchema(),
+            ["videoPrompt"] = StringSchema(),
+            ["videoNegativePrompt"] = StringSchema(),
+            ["narrationText"] = StringSchema(),
+            ["dialogueJson"] = StringSchema(),
+            ["continuityFromPreviousScene"] = StringSchema(),
+            ["validationChecklist"] = StringArraySchema()
+        }
+    };
+
+    private static object StringSchema(int? maxLength = null, string? description = null)
+    {
+        var schema = new Dictionary<string, object?>
+        {
+            ["type"] = "string"
+        };
+        if (maxLength is int max)
+        {
+            schema["maxLength"] = max;
+        }
+
+        if (!string.IsNullOrWhiteSpace(description))
+        {
+            schema["description"] = description;
+        }
+
+        return schema;
+    }
+
+    private static object RoleSchema() => new
+    {
+        type = "string",
+        maxLength = 80,
+        description = "Short narrative function only. Examples: Protagonist, Ruler, Warrior Ally, Commander, Political Antagonist. Never include appearance, clothing, equipment, personality paragraph or scene description."
+    };
 
     private static object StringArraySchema() => new
     {

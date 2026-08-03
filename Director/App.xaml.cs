@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net.Http;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using System.Windows;
@@ -50,12 +51,20 @@ public partial class App : Application
                     options.UseSqlServer(connectionString));
 
                 services.Configure<OllamaOptions>(context.Configuration.GetSection("Ollama"));
+                services.AddSingleton<IValidateOptions<OllamaOptions>, OllamaOptionsValidator>();
                 services.Configure<WanGpOptions>(context.Configuration.GetSection("WanGp"));
                 services.AddSingleton<IValidateOptions<WanGpOptions>, WanGpOptionsValidator>();
-                services.AddHttpClient<IOllamaClient, OllamaClient>();
+                services.AddHttpClient<IOllamaClient, OllamaClient>()
+                    .ConfigurePrimaryHttpMessageHandler(serviceProvider => new SocketsHttpHandler
+                    {
+                        ConnectTimeout = TimeSpan.FromSeconds(Math.Max(
+                            1,
+                            serviceProvider.GetRequiredService<IOptions<OllamaOptions>>().Value.SceneConnectTimeoutSeconds))
+                    });
                 services.AddSingleton<IFilmProjectService, FilmProjectService>();
                 services.AddSingleton<IStoryGenerationService, StoryGenerationService>();
                 services.AddSingleton<IStoryPromptBuilder, StoryPromptBuilder>();
+                services.AddSingleton<IOllamaFailureDiagnosticWriter, OllamaFailureDiagnosticWriter>();
                 services.AddSingleton<IWanGpClient, WanGpMcpClient>();
                 services.AddSingleton<IWanGpProcessManager, WanGpProcessManager>();
                 services.AddSingleton<IWanGpRuntimeCoordinator, WanGpRuntimeCoordinator>();
@@ -68,16 +77,29 @@ public partial class App : Application
                 services.AddSingleton<IMediaFileService, MediaFileService>();
                 services.AddSingleton<IImageThumbnailService, ImageThumbnailService>();
                 services.AddSingleton<IVideoMetadataService, VideoMetadataService>();
+                services.AddSingleton<IWanGpVideoInputContractResolver, WanGpVideoInputContractResolver>();
+                services.AddSingleton<IWanGpVideoTimingContractResolver, WanGpVideoTimingContractResolver>();
                 services.AddSingleton<IWanGpVideoRequestBuilder, WanGpVideoRequestBuilder>();
+                services.AddSingleton<IWanGpAudioInputContractResolver, WanGpAudioInputContractResolver>();
+                services.AddSingleton<IWanGpAudioRequestBuilder, WanGpAudioRequestBuilder>();
+                services.AddSingleton<IWanGpAudioOutputResolver, WanGpAudioOutputResolver>();
+                services.AddSingleton<ISpeechTimelineMixingService, FfmpegSpeechTimelineMixingService>();
+                services.AddSingleton<IFinalDialogueVideoMuxingService, FfmpegFinalDialogueVideoMuxingService>();
                 services.AddSingleton<IVideoPromptComposerService, VideoPromptComposerService>();
+                services.AddSingleton<ILtxNativeDialoguePromptComposer, LtxNativeDialoguePromptComposer>();
+                services.AddSingleton<ILtxNativeDialogueCapabilityResolver, LtxNativeDialogueCapabilityResolver>();
+                services.AddSingleton<IFinalMovieAssemblyService, FfmpegFinalMovieAssemblyService>();
                 services.AddSingleton<IImageGenerationService, ImageGenerationService>();
                 services.AddSingleton<IVideoGenerationService, VideoGenerationService>();
+                services.AddSingleton<IAudioGenerationService, AudioGenerationService>();
+                services.AddSingleton<IProjectGenerationLeaseCoordinator, ProjectGenerationLeaseCoordinator>();
                 services.AddSingleton<IMessageService, MessageService>();
                 services.AddSingleton<INavigationService, NavigationService>();
                 services.AddSingleton<MainViewModel>();
                 services.AddTransient<CreateFilmProjectViewModel>();
                 services.AddTransient<StoryGenerationViewModel>();
                 services.AddTransient<ProjectHistoryViewModel>();
+                services.AddTransient<AudioProductionViewModel>();
                 services.AddTransient<ProductionWorkspaceViewModel>();
                 services.AddTransient<MainWindow>();
             })
@@ -131,7 +153,9 @@ public partial class App : Application
         {
             using var scope = _host.Services.CreateScope();
             var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
-            ShowDatabaseWarning(configuration, ex.Message);
+            var logger = scope.ServiceProvider.GetService<ILogger<App>>();
+            logger?.LogError(ex, "Director database connection check failed.");
+            ShowDatabaseWarning(configuration, "SQL Server baglantisi kurulamadi.");
         }
     }
 
@@ -156,18 +180,51 @@ public partial class App : Application
     private static void ShowDatabaseWarning(IConfiguration configuration, string detail)
     {
         var connectionString = configuration.GetConnectionString("DefaultConnection") ?? "DefaultConnection bulunamadı.";
+        var connectionSummary = BuildSafeConnectionSummary(connectionString);
         MessageBox.Show(
             "Director veritabanına bağlanamadı. Uygulama açılacak, ancak kayıt işlemleri SQL Server bağlantısı düzeltilene kadar başarısız olabilir."
             + Environment.NewLine + Environment.NewLine
-            + "Connection string yolu: appsettings.json > ConnectionStrings:DefaultConnection"
+            + "Configuration: appsettings.json > ConnectionStrings:DefaultConnection"
             + Environment.NewLine
-            + $"Connection string: {connectionString}"
+            + $"Provider: {connectionSummary.Provider}"
+            + Environment.NewLine
+            + $"Database: {connectionSummary.DatabaseName}"
             + Environment.NewLine + Environment.NewLine
             + $"Ayrıntı: {detail}",
             "Veritabanı Bağlantısı",
             MessageBoxButton.OK,
             MessageBoxImage.Warning);
     }
+
+    private static SafeConnectionSummary BuildSafeConnectionSummary(string? connectionString)
+    {
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            return new SafeConnectionSummary("SqlServer", "(configured connection string not found)");
+        }
+
+        try
+        {
+            var builder = new System.Data.Common.DbConnectionStringBuilder
+            {
+                ConnectionString = connectionString
+            };
+            var databaseName = ReadConnectionValue(builder, "Database")
+                ?? ReadConnectionValue(builder, "Initial Catalog")
+                ?? ReadConnectionValue(builder, "AttachDbFilename")
+                ?? "(unknown)";
+            return new SafeConnectionSummary("SqlServer", Path.GetFileName(databaseName));
+        }
+        catch (ArgumentException)
+        {
+            return new SafeConnectionSummary("SqlServer", "(unreadable)");
+        }
+    }
+
+    private static string? ReadConnectionValue(System.Data.Common.DbConnectionStringBuilder builder, string key) =>
+        builder.TryGetValue(key, out var value) ? value?.ToString() : null;
+
+    private sealed record SafeConnectionSummary(string Provider, string DatabaseName);
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {

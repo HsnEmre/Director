@@ -10,7 +10,7 @@ public sealed class StoryPromptBuilder : Interfaces.IStoryPromptBuilder
 
     public string BuildStoryBibleSystemPrompt()
     {
-        return "You are a professional film story architect for an AI film production pipeline. Return only valid JSON matching the provided schema. Do not include markdown. Create a coherent story bible, character continuity bible and visual direction. Keep story, narration and dialogue language aligned with the user's selected language. Image and video prompts will be produced later in English.";
+        return "You are a professional film story architect for an AI film production pipeline. Return only valid JSON matching the provided schema. Do not include markdown. Create a coherent story bible, character continuity bible and visual direction. Keep story, narration and dialogue language aligned with the user's selected language. Image and video prompts will be produced later in English. For every character, role contains only a short narrative role such as Protagonist, Ruler, Warrior Ally, Commander, or Political Antagonist. Never place appearance, clothing or equipment details in role. physicalDescription contains appearance. clothingDescription contains clothing and equipment.";
     }
 
     public string BuildStoryBibleUserPrompt(FilmProject project)
@@ -34,6 +34,7 @@ Narrator tone: {project.NarratorTone}
 Main character notes: {project.MainCharacterDescription}
 Additional instructions: {project.AdditionalInstructions}
 Define clear continuity rules. Character keys must be stable, short, lowercase identifiers.
+For each character: role must be a short story function only, maximum 80 characters, not a sentence. Put face/body/age/physical traits in physicalDescription. Put clothing, armor, fur, leather, weapons and carried equipment in clothingDescription. Never mix those details into role.
 """;
     }
 
@@ -112,5 +113,84 @@ Outlines:
 {outlineText}
 Return exactly {scenes.Count} scenes with matching sceneNumber values.
 """;
+    }
+
+    public string BuildSingleScenePackageSystemPrompt()
+    {
+        return "You create one scene package for an AI film pipeline. Return only valid JSON matching the schema. " + SilentVideoRule + "\n" +
+            "All technical fields must be in English. DialogueJson may contain Turkish dialogue when the story beat needs speech.\n" +
+            "Do not use narrationText; return an empty string for narrationText.\n" +
+            "ImagePrompt and VideoPrompt must be concise but production-ready.\n" +
+            "Keep title/timeOfDay under 120 characters; descriptions, beats, prompts, negatives, continuity and dialogueJson under 900 characters each.\n" +
+            "DialogueJson must be a JSON array string, for example [] or [{\"characterKey\":\"metehan\",\"characterName\":\"Mete Han\",\"text\":\"...\"}].";
+    }
+
+    public string BuildSingleScenePackageUserPrompt(
+        FilmProject project,
+        FilmStory story,
+        int sceneNumber,
+        string previousSceneContext)
+    {
+        var characters = string.Join(Environment.NewLine, story.Characters
+            .OrderBy(character => character.SortOrder)
+            .Take(5)
+            .Select(character => $"{character.CharacterKey}: {character.Name}, {character.Role}. Physical: {Limit(character.PhysicalDescription, 120)} Clothing: {Limit(character.ClothingDescription, 120)} Continuity: {Limit(character.ContinuityDescription, 120)}"));
+
+        var storySection = SelectStorySection(story, sceneNumber, project.CalculatedClipCount);
+
+        return $"""
+Create only scene {sceneNumber} of {project.CalculatedClipCount}.
+Project subject: {Limit(project.Subject, 240)}
+Story title: {Limit(story.Title, 160)}
+Short synopsis: {Limit(story.Synopsis, 600)}
+Relevant story section: {Limit(storySection, 700)}
+Scene position: {DescribeScenePosition(sceneNumber, project.CalculatedClipCount)}
+Story beat target: advance the relevant story section by one distinct beat appropriate for scene {sceneNumber}; do not repeat the previous scene.
+Target duration seconds: {project.ClipDurationSeconds}
+Previous continuity: {Limit(previousSceneContext, 500)}
+Visual style: {Limit(project.VisualStyle, 220)}
+Video style: {Limit(project.VideoStyle, 220)}
+Language: technical fields in English; dialogue text in {project.Language}.
+Characters allowed in this scene:
+{characters}
+
+Return one JSON object for scene {sceneNumber}. Do not include scenes before or after it.
+""";
+    }
+
+    private static string SelectStorySection(FilmStory story, int sceneNumber, int totalScenes)
+    {
+        var ratio = totalScenes <= 0 ? 0 : sceneNumber / (double)totalScenes;
+        return ratio switch
+        {
+            <= 0.2 => story.OpeningSummary,
+            <= 0.7 => story.DevelopmentSummary,
+            <= 0.9 => story.ClimaxSummary,
+            _ => story.EndingSummary
+        };
+    }
+
+    private static string DescribeScenePosition(int sceneNumber, int totalScenes)
+    {
+        var ratio = totalScenes <= 0 ? 0 : sceneNumber / (double)totalScenes;
+        return ratio switch
+        {
+            < 0.2 => "opening setup",
+            < 0.45 => "rising action",
+            < 0.75 => "middle escalation",
+            < 0.9 => "climax approach",
+            _ => "ending resolution"
+        };
+    }
+
+    private static string Limit(string value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = value.Trim();
+        return trimmed.Length <= maxLength ? trimmed : trimmed[..maxLength];
     }
 }

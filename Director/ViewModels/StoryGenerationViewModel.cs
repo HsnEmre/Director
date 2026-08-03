@@ -10,6 +10,7 @@ using Director.Enums;
 using Director.Helpers;
 using Director.Ollama;
 using Director.Options;
+using Director.Services;
 using Director.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -80,13 +81,13 @@ public sealed class StoryGenerationViewModel : ObservableObject
         _elapsedTimer.Tick += (_, _) => ElapsedTimeText = _stopwatch.Elapsed.ToString(@"mm\:ss");
     }
 
-    public int FilmProjectId { get => _filmProjectId; private set => SetProperty(ref _filmProjectId, value); }
+    public int FilmProjectId { get => _filmProjectId; internal set => SetProperty(ref _filmProjectId, value); }
     public bool IsBusy { get => _isBusy; private set { if (SetProperty(ref _isBusy, value)) RaiseCommandStates(); } }
     public bool HasHealthChecked { get => _hasHealthChecked; private set => SetProperty(ref _hasHealthChecked, value); }
     public string ProjectName { get => _projectName; private set => SetProperty(ref _projectName, value); }
     public string ProjectSummary { get => _projectSummary; private set => SetProperty(ref _projectSummary, value); }
     public string SubjectPreview { get => _subjectPreview; private set => SetProperty(ref _subjectPreview, value); }
-    public string ModelName => _options.Model;
+    public string ModelName => _options.StoryTextModel;
     public string OllamaStatus { get => _ollamaStatus; private set => SetProperty(ref _ollamaStatus, value); }
     public string Phase { get => _phase; private set => SetProperty(ref _phase, value); }
     public string ProgressMessage { get => _progressMessage; private set => SetProperty(ref _progressMessage, value); }
@@ -151,9 +152,9 @@ public sealed class StoryGenerationViewModel : ObservableObject
                 return;
             }
 
-            await _ollamaClient.IsModelAvailableAsync(_options.Model);
+            await _ollamaClient.IsModelAvailableAsync(_options.StoryTextModel);
             HasHealthChecked = true;
-            OllamaStatus = $"Bağlantı başarılı. Model kullanılabilir: {_options.Model}";
+            OllamaStatus = $"Bağlantı başarılı. Model kullanılabilir: {_options.StoryTextModel}";
             AddLog("Ollama kontrolü", OllamaStatus, GenerationLogLevel.Success);
         }
         finally
@@ -162,15 +163,8 @@ public sealed class StoryGenerationViewModel : ObservableObject
         }
     }
 
-    private async Task GenerateStoryAsync()
+    internal async Task GenerateStoryAsync()
     {
-        await using var db = await _dbContextFactory.CreateDbContextAsync();
-        var existingStory = await db.FilmStories.AsNoTracking().AnyAsync(story => story.FilmProjectId == FilmProjectId);
-        if (existingStory && !_messageService.Confirm("Bu proje için mevcut hikaye ve sahne kayıtları kontrollü olarak yenilenecek. Devam edilsin mi?", "Hikayeyi Yeniden Oluştur"))
-        {
-            return;
-        }
-
         IsBusy = true;
         _generationCancellation = new CancellationTokenSource();
         _stopwatch.Restart();
@@ -179,7 +173,8 @@ public sealed class StoryGenerationViewModel : ObservableObject
         try
         {
             var progress = new Progress<StoryGenerationProgress>(OnProgressChanged);
-            await _storyGenerationService.GenerateStoryAsync(FilmProjectId, progress, _generationCancellation.Token);
+            AddLog("Model", $"Model: {_options.StoryTextModel}", GenerationLogLevel.Information);
+            await _storyGenerationService.GenerateAllMissingScenesAsync(FilmProjectId, progress, _generationCancellation.Token);
             await LoadGeneratedContentAsync(CancellationToken.None);
         }
         catch (OperationCanceledException)
@@ -187,6 +182,30 @@ public sealed class StoryGenerationViewModel : ObservableObject
             Phase = "İptal edildi";
             ProgressMessage = "Hikaye üretimi kullanıcı tarafından iptal edildi.";
             AddLog("İptal", ProgressMessage, GenerationLogLevel.Warning);
+        }
+        catch (ProjectGenerationAlreadyRunningException)
+        {
+            Phase = "Proje üretimi kullanımda";
+            ProgressMessage = ProjectGenerationAlreadyRunningException.UserMessage;
+            AddLog("Proje üretimi", ProgressMessage, GenerationLogLevel.Warning);
+            _messageService.ShowError(ProgressMessage);
+        }
+        catch (StoryCharacterValidationException ex)
+        {
+            Phase = "Karakter dogrulama hatasi";
+            ProgressMessage = ex.Message;
+            AddLog("Hata", $"{ex.Message} Teknik detay: {ex.TechnicalDetails}", GenerationLogLevel.Error);
+            _messageService.ShowError(ex.Message);
+        }
+        catch (StorySceneGenerationException ex)
+        {
+            Phase = $"Sahne {ex.SceneNumber} durduruldu";
+            ProgressMessage = $"Sahne {ex.SceneNumber} icin model cevabi dogrulanamadi. Onceki sahneler korundu.";
+            AddLog("Sahne dogrulama", $"ProjectId={ex.FilmProjectId}; SceneNumber={ex.SceneNumber}; Stage={ex.Stage}; Teknik log={ex.LogPath}", GenerationLogLevel.Error, ex.SceneNumber, ex.SceneNumber);
+            await LoadGeneratedContentAsync(CancellationToken.None);
+            _messageService.ShowError(
+                $"Sahne {ex.SceneNumber} için model cevabı doğrulanamadı. Önceki sahneleriniz korunmuştur. " +
+                $"Aynı sahneyi yeniden deneyebilir veya daha sonra projeye devam edebilirsiniz. Teknik log: {ex.LogPath}");
         }
         catch (Exception ex)
         {

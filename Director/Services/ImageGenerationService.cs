@@ -56,11 +56,6 @@ public sealed class ImageGenerationService : IImageGenerationService
     {
         GenerationJob? job = null;
         var scene = await LoadSceneAsync(sceneId, cancellationToken);
-        await using var gpuLease = await _gpuCoordinator.AcquireAsync(
-            GenerationOperationType.Image,
-            scene.FilmProjectId,
-            scene.Id,
-            cancellationToken);
         try
         {
             var beforeOutputSnapshot = _outputResolver.CaptureSnapshot();
@@ -93,6 +88,13 @@ public sealed class ImageGenerationService : IImageGenerationService
                 StopOnError = request.StopOnError
             };
 
+            WanGpJobSnapshot snapshot;
+            await using (var gpuLease = await _gpuCoordinator.AcquireAsync(
+                GenerationOperationType.Image,
+                scene.FilmProjectId,
+                scene.Id,
+                cancellationToken))
+            {
             var submission = await _wanGpClient.SubmitImageGenerationAsync(effectiveRequest, schema, cancellationToken);
             if (string.IsNullOrWhiteSpace(submission.ExternalJobId))
             {
@@ -114,7 +116,7 @@ public sealed class ImageGenerationService : IImageGenerationService
                 existing.UpdatedAt = DateTime.Now;
             }, cancellationToken);
 
-            var snapshot = await PollUntilTerminalAsync(
+            snapshot = await PollUntilTerminalAsync(
                 job.Id,
                 submission.ExternalJobId,
                 scene.SceneNumber,
@@ -122,6 +124,7 @@ public sealed class ImageGenerationService : IImageGenerationService
                 job.StartedAt ?? job.CreatedAt,
                 progress,
                 cancellationToken);
+            }
             if (snapshot.Status != GenerationJobStatus.Completed)
             {
                 await UpdateJobAsync(job.Id, existing =>
@@ -130,8 +133,8 @@ public sealed class ImageGenerationService : IImageGenerationService
                     existing.ErrorMessage = snapshot.Message;
                     existing.CompletedAt = DateTime.Now;
                     existing.UpdatedAt = DateTime.Now;
-                }, CancellationToken.None);
-                return await LoadJobAsync(job.Id, CancellationToken.None);
+                }, cancellationToken);
+                return await LoadJobAsync(job.Id, cancellationToken);
             }
 
             var explicitPaths = snapshot.GeneratedFiles.ToList();
@@ -155,7 +158,7 @@ public sealed class ImageGenerationService : IImageGenerationService
                 job.StartedAt ?? job.CreatedAt,
                 explicitPaths,
                 null,
-                CancellationToken.None);
+                cancellationToken);
 
             if (!outputResult.Success)
             {
@@ -166,11 +169,12 @@ public sealed class ImageGenerationService : IImageGenerationService
                     existing.CompletedAt = DateTime.Now;
                     existing.UpdatedAt = DateTime.Now;
                     existing.CurrentPhase = outputResult.IsAmbiguous ? "OutputAmbiguous" : "Output bulunamadi";
-                }, CancellationToken.None);
+                }, cancellationToken);
                 throw new InvalidOperationException(outputResult.Message);
             }
 
-            var savedAsset = await SaveCompletedAssetAsync(scene.Id, job.Id, outputResult.Candidates, snapshot.Seed, CancellationToken.None);
+            cancellationToken.ThrowIfCancellationRequested();
+            var savedAsset = await SaveCompletedAssetAsync(scene.Id, job.Id, outputResult.Candidates, snapshot.Seed, cancellationToken);
             _activityCenter.AddLog("Dosya", "Gorsel Director proje klasorune kopyalandi.", GenerationLogLevel.Success);
             progress?.Report(new MediaGenerationProgress
             {
@@ -183,19 +187,13 @@ public sealed class ImageGenerationService : IImageGenerationService
                 PreviewPath = savedAsset.FilePath
             });
 
-            return await LoadJobAsync(job.Id, CancellationToken.None);
+            return await LoadCompletedJobAsync(job.Id, cancellationToken);
         }
         catch (OperationCanceledException)
         {
             if (job is not null)
             {
-                await UpdateJobAsync(job.Id, existing =>
-                {
-                    existing.Status = GenerationJobStatus.Cancelled;
-                    existing.CancelRequestedAt = DateTime.Now;
-                    existing.CompletedAt = DateTime.Now;
-                    existing.UpdatedAt = DateTime.Now;
-                }, CancellationToken.None);
+                await MarkJobCancelledBestEffortAsync(job.Id);
             }
 
             throw;
@@ -205,13 +203,7 @@ public sealed class ImageGenerationService : IImageGenerationService
             _logger.LogError(ex, "WanGP görsel üretimi başarısız oldu.");
             if (job is not null)
             {
-                await UpdateJobAsync(job.Id, existing =>
-                {
-                    existing.Status = GenerationJobStatus.Failed;
-                    existing.ErrorMessage = ex.Message;
-                    existing.CompletedAt = DateTime.Now;
-                    existing.UpdatedAt = DateTime.Now;
-                }, CancellationToken.None);
+                await MarkJobFailedBestEffortAsync(job.Id, ex.Message);
             }
 
             throw;
@@ -449,7 +441,7 @@ public sealed class ImageGenerationService : IImageGenerationService
                     job.CurrentStep = snapshot.CurrentStep;
                     job.TotalSteps = snapshot.TotalSteps;
                     job.UpdatedAt = DateTime.Now;
-                }, CancellationToken.None);
+                }, linked.Token);
                 lastPersist = DateTime.Now;
             }
 
@@ -487,13 +479,14 @@ public sealed class ImageGenerationService : IImageGenerationService
                     PreviewPath = paths.FirstOrDefault()
                 });
 
+                linked.Token.ThrowIfCancellationRequested();
                 await UpdateJobAsync(jobId, job =>
                 {
                     job.Status = GenerationJobStatus.Completed;
                     job.ProgressPercentage = Math.Max(job.ProgressPercentage, 95);
                     job.CurrentPhase = "Output resolved";
                     job.UpdatedAt = DateTime.Now;
-                }, CancellationToken.None);
+                }, linked.Token);
 
                 snapshot.Status = GenerationJobStatus.Completed;
                 snapshot.Message = "OutputResolvedBeforeMcpTerminalState";
@@ -577,6 +570,55 @@ public sealed class ImageGenerationService : IImageGenerationService
 
         update(job);
         await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task MarkJobCancelledBestEffortAsync(int jobId)
+    {
+        try
+        {
+            using var cleanup = GenerationCleanupPolicy.CreateTokenSource();
+            await UpdateJobAsync(jobId, existing =>
+            {
+                existing.Status = GenerationJobStatus.Cancelled;
+                existing.CancelRequestedAt = DateTime.Now;
+                existing.CompletedAt = DateTime.Now;
+                existing.UpdatedAt = DateTime.Now;
+            }, cleanup.Token);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Image generation cancel cleanup failed. JobId={JobId}; TimeoutSeconds={TimeoutSeconds}", jobId, GenerationCleanupPolicy.CleanupTimeoutSeconds);
+        }
+    }
+
+    private async Task MarkJobFailedBestEffortAsync(int jobId, string errorMessage)
+    {
+        try
+        {
+            using var cleanup = GenerationCleanupPolicy.CreateTokenSource();
+            await UpdateJobAsync(jobId, existing =>
+            {
+                existing.Status = GenerationJobStatus.Failed;
+                existing.ErrorMessage = errorMessage;
+                existing.CompletedAt = DateTime.Now;
+                existing.UpdatedAt = DateTime.Now;
+            }, cleanup.Token);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Image generation failure cleanup failed. JobId={JobId}; TimeoutSeconds={TimeoutSeconds}", jobId, GenerationCleanupPolicy.CleanupTimeoutSeconds);
+        }
+    }
+
+    private async Task<GenerationJob> LoadCompletedJobAsync(int jobId, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Image generation cancellation arrived after the atomic completion point. Completed DB state is preserved. JobId={JobId}", jobId);
+        }
+
+        using var cleanup = GenerationCleanupPolicy.CreateTokenSource();
+        return await LoadJobAsync(jobId, cleanup.Token);
     }
 
     private async Task<GenerationJob> LoadJobAsync(int jobId, CancellationToken cancellationToken)

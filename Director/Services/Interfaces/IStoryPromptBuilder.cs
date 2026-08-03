@@ -22,4 +22,11 @@ public interface IStoryPromptBuilder
         FilmStory story,
         IReadOnlyList<SceneOutlineItemDto> scenes,
         string? previousSceneContext);
+
+    string BuildSingleScenePackageSystemPrompt();
+    string BuildSingleScenePackageUserPrompt(
+        FilmProject project,
+        FilmStory story,
+        int sceneNumber,
+        string previousSceneContext);
 }

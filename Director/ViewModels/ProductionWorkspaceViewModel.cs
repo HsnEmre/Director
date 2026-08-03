@@ -7,6 +7,8 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Director.Commands;
 using Director.Data;
 using Director.Dtos.MediaGeneration;
@@ -26,14 +28,18 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
     private readonly IWanGpClient _wanGpClient;
     private readonly IWanGpRuntimeCoordinator _runtimeCoordinator;
     private readonly IWanGpLocalModelInventoryService _inventoryService;
+    private readonly IWanGpVideoInputContractResolver _videoInputContractResolver;
     private readonly IWanGpOutputResolver _outputResolver;
     private readonly IImageGenerationService _imageGenerationService;
     private readonly IVideoPromptComposerService _videoPromptComposerService;
+    private readonly ILtxNativeDialoguePromptComposer _ltxNativeDialoguePromptComposer;
     private readonly IOllamaModelLifecycleService _ollamaModelLifecycleService;
     private readonly IVideoGenerationService _videoGenerationService;
+    private readonly ILtxNativeDialogueCapabilityResolver _ltxNativeDialogueCapabilityResolver;
     private readonly IGpuGenerationCoordinator _gpuCoordinator;
     private readonly IApplicationActivityCenter _activityCenter;
     private readonly WanGpOptions _options;
+    private readonly OllamaOptions _ollamaOptions;
     private CancellationTokenSource? _generationCancellation;
     private int _filmProjectId;
     private string _projectName = string.Empty;
@@ -65,34 +71,46 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
     private string _preparedVideoPrompt = string.Empty;
     private string _preparedVideoNegativePrompt = string.Empty;
     private string _videoStatus = "Video hazir degil.";
-    private Uri? _videoPreviewSource;
+    private Uri? _previewVideoUri;
+    private VideoAudioGenerationMode _selectedVideoAudioMode = VideoAudioGenerationMode.SilentVideo;
+    private bool _ltxNativeSmokeApproved;
 
     public ProductionWorkspaceViewModel(
         IDbContextFactory<AppDbContext> dbContextFactory,
         IWanGpClient wanGpClient,
         IWanGpRuntimeCoordinator runtimeCoordinator,
         IWanGpLocalModelInventoryService inventoryService,
+        IWanGpVideoInputContractResolver videoInputContractResolver,
         IWanGpOutputResolver outputResolver,
         IImageGenerationService imageGenerationService,
         IVideoPromptComposerService videoPromptComposerService,
+        ILtxNativeDialoguePromptComposer ltxNativeDialoguePromptComposer,
         IOllamaModelLifecycleService ollamaModelLifecycleService,
         IVideoGenerationService videoGenerationService,
+        ILtxNativeDialogueCapabilityResolver ltxNativeDialogueCapabilityResolver,
+        AudioProductionViewModel audioProduction,
         IGpuGenerationCoordinator gpuCoordinator,
         IApplicationActivityCenter activityCenter,
-        IOptions<WanGpOptions> options)
+        IOptions<WanGpOptions> options,
+        IOptions<OllamaOptions> ollamaOptions)
     {
         _dbContextFactory = dbContextFactory;
         _wanGpClient = wanGpClient;
         _runtimeCoordinator = runtimeCoordinator;
         _inventoryService = inventoryService;
+        _videoInputContractResolver = videoInputContractResolver;
         _outputResolver = outputResolver;
         _imageGenerationService = imageGenerationService;
         _videoPromptComposerService = videoPromptComposerService;
+        _ltxNativeDialoguePromptComposer = ltxNativeDialoguePromptComposer;
         _ollamaModelLifecycleService = ollamaModelLifecycleService;
         _videoGenerationService = videoGenerationService;
+        _ltxNativeDialogueCapabilityResolver = ltxNativeDialogueCapabilityResolver;
+        Audio = audioProduction;
         _gpuCoordinator = gpuCoordinator;
         _activityCenter = activityCenter;
         _options = options.Value;
+        _ollamaOptions = ollamaOptions.Value;
 
         Scenes = new ObservableCollection<ProductionSceneRowViewModel>();
         Assets = new ObservableCollection<SceneMediaAssetRowViewModel>();
@@ -103,6 +121,12 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         InstalledVideoModels = new ObservableCollection<WanGpVideoModelOptionViewModel>();
         OtherVideoModels = new ObservableCollection<WanGpVideoModelOptionViewModel>();
         VideoConfigurations = new ObservableCollection<WanGpVideoConfigurationOptionViewModel>();
+        VideoAudioModes = new ObservableCollection<VideoAudioModeOptionViewModel>
+        {
+            new(VideoAudioGenerationMode.SilentVideo, "Sessiz Video"),
+            new(VideoAudioGenerationMode.ExternalDialogue, "KugelAudio Konusmasi"),
+            new(VideoAudioGenerationMode.LtxNativeDialogue, "LTX Yerlesik Konusma")
+        };
         Resolutions = new ObservableCollection<string> { "1024x1024", "768x768", "512x512", "1280x720", "1920x1080" };
         Logs = _activityCenter.Logs;
 
@@ -126,6 +150,8 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         GenerateVideoCommand = new AsyncRelayCommand(GenerateVideoAsync, CanGenerateVideo);
         SelectVideoAssetCommand = new AsyncRelayCommand(SelectVideoAssetAsync, () => !IsBusy && SelectedVideoAsset is not null);
         RefreshVideoModelsCommand = new AsyncRelayCommand(() => RefreshVideoModelsFromUiAsync(forceRefresh: true, CancellationToken.None), () => !IsBusy);
+        ApproveLtxNativeSmokeCommand = new RelayCommand(ApproveLtxNativeSmoke);
+        GenerateFiveMinuteLtxDialogueTestCommand = new RelayCommand(ReportFiveMinuteBatchGate, () => LtxNativeSmokeApproved);
 
         _activityCenter.Changed += (_, _) =>
         {
@@ -182,6 +208,10 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
                 PreparedVideoPrompt = value?.VideoPrompt ?? string.Empty;
                 PreparedVideoNegativePrompt = value?.VideoNegativePrompt ?? string.Empty;
                 OnPropertyChanged(nameof(SelectedSceneDisplay));
+                OnPropertyChanged(nameof(VideoReferenceImageDetails));
+                OnPropertyChanged(nameof(VideoDialogueSourceDetails));
+                OnPropertyChanged(nameof(PreparedPromptChecks));
+                Audio.SetContext(FilmProjectId, value?.Id);
                 if (value is not null)
                 {
                     AddLog("Sahne", $"Sahne {value.SceneNumber} secildi.");
@@ -199,6 +229,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
             if (SetProperty(ref _selectedVideoModel, value))
             {
                 OnPropertyChanged(nameof(SelectedVideoModelDetails));
+                OnPropertyChanged(nameof(PreparedPromptChecks));
                 LoadVideoConfigurations(value);
                 RaiseCommandStates();
             }
@@ -284,10 +315,75 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
     public string PreparedVideoPrompt { get => _preparedVideoPrompt; set { if (SetProperty(ref _preparedVideoPrompt, value)) RaiseCommandStates(); } }
     public string PreparedVideoNegativePrompt { get => _preparedVideoNegativePrompt; set => SetProperty(ref _preparedVideoNegativePrompt, value); }
     public string VideoStatus { get => _videoStatus; private set => SetProperty(ref _videoStatus, value); }
-    public Uri? VideoPreviewSource { get => _videoPreviewSource; private set => SetProperty(ref _videoPreviewSource, value); }
+    public Uri? PreviewVideoUri { get => _previewVideoUri; private set => SetProperty(ref _previewVideoUri, value); }
+    public Uri? VideoPreviewSource => PreviewVideoUri;
+    public VideoAudioGenerationMode SelectedVideoAudioMode
+    {
+        get => _selectedVideoAudioMode;
+        set
+        {
+            if (SetProperty(ref _selectedVideoAudioMode, value))
+            {
+                RaiseCommandStates();
+            }
+        }
+    }
+
+    public bool LtxNativeSmokeApproved
+    {
+        get => _ltxNativeSmokeApproved;
+        private set
+        {
+            if (SetProperty(ref _ltxNativeSmokeApproved, value))
+            {
+                RaiseCommandStates();
+            }
+        }
+    }
+
     public string SelectedVideoModelDetails => SelectedVideoModel is null
         ? "Video modeli secilmedi."
-        : $"Prompt Hazirlama Modeli: qwen3-vl:30b-a3b-instruct\nVideo Uretim Modeli: {SelectedVideoModel.DisplayText}\nConfig: {SelectedVideoConfiguration?.DisplayText ?? "-"}\nmodel_type: {SelectedVideoModel.ModelType}\nArchitecture: {SelectedVideoModel.Architecture}\nCheckpoint: {SelectedVideoConfiguration?.CheckpointPath ?? SelectedVideoModel.CheckpointPath ?? "-"}\nDurum: {SelectedVideoModel.Availability}";
+        : $"Prompt Hazirlama Modeli: {_ollamaOptions.PromptPreparationModel}\nVideo ve Native Ses Modeli: {SelectedVideoModel.DisplayText}\nConfig: {SelectedVideoConfiguration?.DisplayText ?? "-"}\nmodel_type: {SelectedVideoModel.ModelType}\nCanonical: {SelectedVideoModel.NativeDialogueCanonicalModelType}\nFamily: {SelectedVideoModel.Family}\nArchitecture: {SelectedVideoModel.Architecture}\nOutputs: {SelectedVideoModel.Outputs}\nCheckpoint: {SelectedVideoConfiguration?.CheckpointPath ?? SelectedVideoModel.CheckpointPath ?? "-"}\nNative video: {(SelectedVideoModel.SupportsImageToVideo ? "Destekleniyor" : "Desteklenmiyor")}\nNative audio: {(SelectedVideoModel.SupportsAudioOutput ? "Destekleniyor" : "Desteklenmiyor")}\nStart Image: {(SelectedVideoModel.SupportsStartImage ? "Destekleniyor" : "Desteklenmiyor")}\nInput Key: {SelectedVideoModel.ResolvedStartImageKey}\nMode: {SelectedVideoModel.ResolvedInputMode}\nNative Dialogue Contract: {(SelectedVideoModel.NativeDialogueSupported ? "Dogrulandi" : "Dogrulanmadi")}\nContract: {(SelectedVideoModel.InputContractValidated ? "Dogrulandi" : "Dogrulanmadi")}\nKanıt: {SelectedVideoModel.NativeDialogueEvidence}\nDurum: {SelectedVideoModel.Availability}";
+    public string VideoReferenceImageDetails
+    {
+        get
+        {
+            var asset = SelectedScene?.Assets.FirstOrDefault(item => item.IsSelected);
+            if (asset is null)
+            {
+                return "Kullanilacak Referans Gorsel: Secili ana gorsel yok.\nInput Mode: Start Image\nWanGP request durumu: Eklenmedi";
+            }
+
+            var fileName = string.IsNullOrWhiteSpace(asset.FilePath) ? "-" : Path.GetFileName(asset.FilePath);
+            var resolution = asset.Width is int width && asset.Height is int height ? $"{width}x{height}" : "-";
+            return $"Kullanilacak Referans Gorsel\nAssetId: {asset.Id}\nDosya: {fileName}\nCozunurluk: {resolution}\nIsSelected: {asset.IsSelected}\nInput Mode: Start Image\nWanGP request durumu: Uretim baslayinca dogrulanacak";
+        }
+    }
+
+    public string VideoDialogueSourceDetails
+    {
+        get
+        {
+            var hasDialogue = SceneHasDialogue(SelectedScene);
+            return hasDialogue
+                ? "Konusma Kaynagi: DialogueJson\nUretim Turu: LTX Turkce Konusmali Video"
+                : "Konusma Kaynagi: DialogueJson\nUretim Turu: Konusmasiz LTX Video";
+        }
+    }
+
+    public string PreparedPromptChecks
+    {
+        get
+        {
+            var hasDialogue = SceneHasDialogue(SelectedScene);
+            var exactReady = hasDialogue ? "Hazirlanacak" : "Gerekli degil";
+            var speechReady = hasDialogue ? "Hazirlanacak" : "Gerekli degil";
+            var lipSyncReady = hasDialogue ? "Hazirlanacak" : "Gerekli degil";
+            var startImageReady = SelectedScene?.Assets.Any(asset => asset.IsSelected && File.Exists(asset.FilePath)) == true ? "Hazir" : "Eksik";
+            var nativeAudioReady = hasDialogue && SelectedVideoModel?.NativeDialogueSupported == true ? "Acik" : hasDialogue ? "Eksik" : "Gerekli degil";
+            return $"Hazirlanan Prompt Kontrolleri\nExact dialogue: {exactReady}\nTurkish speech instruction: {speechReady}\nLip-sync instruction: {lipSyncReady}\nStart Image: {startImageReady}\nNative audio: {nativeAudioReady}";
+        }
+    }
 
     public ObservableCollection<ProductionSceneRowViewModel> Scenes { get; }
     public ObservableCollection<SceneMediaAssetRowViewModel> Assets { get; }
@@ -298,8 +394,10 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
     public ObservableCollection<WanGpVideoModelOptionViewModel> InstalledVideoModels { get; }
     public ObservableCollection<WanGpVideoModelOptionViewModel> OtherVideoModels { get; }
     public ObservableCollection<WanGpVideoConfigurationOptionViewModel> VideoConfigurations { get; }
+    public ObservableCollection<VideoAudioModeOptionViewModel> VideoAudioModes { get; }
     public ObservableCollection<string> Resolutions { get; }
     public ObservableCollection<ProductionLogEntry> Logs { get; }
+    public AudioProductionViewModel Audio { get; }
 
     public ICommand TestConnectionCommand { get; }
     public ICommand RefreshModelsCommand { get; }
@@ -321,6 +419,8 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
     public ICommand GenerateVideoCommand { get; }
     public ICommand SelectVideoAssetCommand { get; }
     public ICommand RefreshVideoModelsCommand { get; }
+    public ICommand ApproveLtxNativeSmokeCommand { get; }
+    public ICommand GenerateFiveMinuteLtxDialogueTestCommand { get; }
 
     public WanGpOutputCandidate? SelectedWanGpOutput
     {
@@ -341,7 +441,19 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         {
             if (SetProperty(ref _selectedVideoAsset, value))
             {
-                VideoPreviewSource = string.IsNullOrWhiteSpace(value?.FilePath) ? null : new Uri(value.FilePath, UriKind.Absolute);
+                PreviewVideoUri = null;
+                OnPropertyChanged(nameof(VideoPreviewSource));
+                if (!string.IsNullOrWhiteSpace(value?.FilePath) && File.Exists(value.FilePath))
+                {
+                    PreviewVideoUri = new Uri(Path.GetFullPath(value.FilePath), UriKind.Absolute);
+                    VideoStatus = "Video onizleme kaynagi hazirlaniyor.";
+                }
+                else if (value is not null)
+                {
+                    VideoStatus = "Video dosyasi bulunamadi.";
+                }
+
+                OnPropertyChanged(nameof(VideoPreviewSource));
                 RaiseCommandStates();
             }
         }
@@ -350,6 +462,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
     public async Task InitializeAsync(int filmProjectId, CancellationToken cancellationToken = default)
     {
         FilmProjectId = filmProjectId;
+        Audio.SetContext(filmProjectId, SelectedScene?.Id);
         await LoadProjectAsync(cancellationToken);
         await LoadScenesAsync(cancellationToken);
         AddLog("Hazir", "Gorsel uretim calisma alani acildi.");
@@ -606,6 +719,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
                 ImageNegativePrompt = scene.ImageNegativePrompt,
                 VideoPrompt = scene.VideoPrompt,
                 VideoNegativePrompt = scene.VideoNegativePrompt,
+                DialogueJson = scene.DialogueJson,
                 DurationSeconds = scene.DurationSeconds,
                 SelectedImagePath = scene.MediaAssets
                     .Where(asset => asset.MediaType == MediaType.Image && asset.IsSelected)
@@ -629,7 +743,9 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
                         IsSelected = asset.IsSelected,
                         ModelType = asset.ModelType,
                         CreatedAt = asset.CreatedAt,
-                        Seed = asset.Seed
+                        Seed = asset.Seed,
+                        Width = asset.Width,
+                        Height = asset.Height
                     })
                     .ToList()
                 ,
@@ -646,7 +762,9 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
                         ModelType = asset.ModelType,
                         CreatedAt = asset.CreatedAt,
                         Seed = asset.Seed,
-                        DurationSeconds = asset.DurationSeconds
+                        DurationSeconds = asset.DurationSeconds,
+                        Width = asset.Width,
+                        Height = asset.Height
                     })
                     .ToList()
             })
@@ -784,35 +902,72 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         AddLog("VideoModel", "Model metadata degerleri inceleniyor.");
         AddLog("VideoModel", "Yerel kurulum durumu kontrol ediliyor.");
         var inventory = await _inventoryService.GetInventoryAsync(models, forceRefresh, cancellationToken);
-        var merged = models.Select(model =>
+        var merged = new List<WanGpVideoModelOptionViewModel>();
+        foreach (var model in models)
         {
             inventory.TryGetValue(model.ModelType, out var item);
             var installed = ResolveInstallStatus(model, item);
             var architecture = string.IsNullOrWhiteSpace(model.Architecture) ? model.BaseModelType : model.Architecture;
-            return new WanGpVideoModelOptionViewModel
+            WanGpModelSchema? schema = null;
+            WanGpVideoInputContract? inputContract = null;
+            if (installed == WanGpModelInstallStatus.Installed)
+            {
+                try
+                {
+                    schema = await _wanGpClient.GetModelSchemaAsync(model.ModelType, cancellationToken);
+                    inputContract = await _videoInputContractResolver.ResolveAsync(
+                        model,
+                        schema,
+                        ToObjectDictionary(schema?.DefaultSettings),
+                        cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    AddLog("VideoModel", $"{model.ModelType} contract cozumleme basarisiz: {ex.Message}", GenerationLogLevel.Warning);
+                }
+            }
+
+            var option = new WanGpVideoModelOptionViewModel
             {
                 ModelType = model.ModelType,
                 DisplayName = string.IsNullOrWhiteSpace(model.DisplayName) ? model.ModelType : model.DisplayName,
                 Family = model.Family,
                 Architecture = architecture,
+                Outputs = model.Outputs,
                 Availability = string.IsNullOrWhiteSpace(model.Availability) ? installed.ToString() : model.Availability,
                 InstallationStatus = installed,
                 CheckpointPath = item?.CheckpointPath,
                 SupportsImageToVideo = model.SupportsImageToVideo,
-                SupportsStartImage = model.SupportsStartImage || model.Inputs.Contains("image", StringComparison.OrdinalIgnoreCase),
-                SupportsReferenceImage = model.SupportsReferenceImage || model.Inputs.Contains("image", StringComparison.OrdinalIgnoreCase),
+                SupportsStartImage = inputContract?.SupportsStartImage == true,
+                SupportsReferenceImage = inputContract?.SupportsReferenceImage == true,
+                ResolvedStartImageKey = inputContract?.StartImageKey ?? string.Empty,
+                ResolvedInputMode = inputContract is null ? string.Empty : $"{inputContract.StartImageModeKey}={inputContract.StartImageModeValue}",
+                InputContractValidated = inputContract?.IsValidated == true,
+                InputContractEvidence = inputContract?.EvidenceText ?? string.Empty,
+                InputContract = inputContract,
                 Configurations = BuildVideoConfigurations(model, item?.CheckpointPath)
             };
-        })
-        .Where(model => !model.IsImageOnly)
-        .OrderByDescending(model => model.ModelType.Contains("ltx2_22B_distilled_gguf_q4_k_m", StringComparison.OrdinalIgnoreCase))
-        .ThenByDescending(model => model.ModelType.Contains("ltx", StringComparison.OrdinalIgnoreCase))
-        .ThenBy(model => model.DisplayName)
-        .ToList();
+            var capability = _ltxNativeDialogueCapabilityResolver.Resolve(model, inputContract, installed);
+            option.NativeDialogueSupported = capability.IsSupported;
+            option.NativeDialogueCanonicalModelType = capability.CanonicalModelType;
+            option.NativeDialogueFailureReason = capability.FailureReason;
+            option.NativeDialogueEvidence = string.Join(", ", capability.Evidence);
+
+            if (!option.IsImageOnly)
+            {
+                merged.Add(option);
+            }
+        }
+
+        merged = merged
+            .OrderByDescending(model => model.ModelType.Contains("ltx2_22B_distilled_gguf_q4_k_m", StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(model => model.ModelType.Contains("ltx", StringComparison.OrdinalIgnoreCase))
+            .ThenBy(model => model.DisplayName)
+            .ToList();
 
         var installedModels = merged.Where(model => model.IsSelectable).ToList();
         var otherModels = merged.Where(model => !model.IsSelectable).ToList();
-        var current = SelectedVideoModel?.ModelType;
+        var current = SelectedVideoModel?.NativeDialogueCanonicalModelType ?? SelectedVideoModel?.ModelType;
 
         void ApplyModels()
         {
@@ -828,8 +983,10 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
                 OtherVideoModels.Add(model);
             }
 
-            SelectedVideoModel = InstalledVideoModels.FirstOrDefault(model => model.ModelType == current)
+            SelectedVideoModel = InstalledVideoModels.FirstOrDefault(model => string.Equals(model.NativeDialogueCanonicalModelType, current, StringComparison.OrdinalIgnoreCase))
+                ?? InstalledVideoModels.FirstOrDefault(model => string.Equals(model.ModelType, current, StringComparison.OrdinalIgnoreCase))
                 ?? InstalledVideoModels.FirstOrDefault(model => model.ModelType.Contains("ltx2_22B_distilled_gguf_q4_k_m", StringComparison.OrdinalIgnoreCase))
+                ?? InstalledVideoModels.FirstOrDefault(model => model.NativeDialogueSupported)
                 ?? InstalledVideoModels.FirstOrDefault(model => model.ModelType.Contains("ltx2_22B_distilled", StringComparison.OrdinalIgnoreCase))
                 ?? InstalledVideoModels.FirstOrDefault();
         }
@@ -920,6 +1077,19 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         return configurations;
     }
 
+    private static Dictionary<string, object?> ToObjectDictionary(JsonObject? source)
+    {
+        if (source is null)
+        {
+            return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        return source.ToDictionary(
+            item => item.Key,
+            item => item.Value is null ? null : item.Value.Deserialize<object>(new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
     private async Task PrepareVideoPromptAsync()
     {
         if (SelectedScene is null)
@@ -941,8 +1111,8 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(PreparedVideoPrompt))).ToLowerInvariant();
             AddLog("VideoPromptPreparing", $"Video hareket promptu hazirlandi. Uzunluk={PreparedVideoPrompt.Length}, SHA256={hash[..12]}", GenerationLogLevel.Success);
             AddLog("OllamaModelUnloading", "Qwen modeli GPU belleginden cikariliyor.");
-            await _ollamaModelLifecycleService.UnloadModelAsync("qwen3-vl:30b-a3b-instruct");
-            var unloaded = await _ollamaModelLifecycleService.WaitUntilUnloadedAsync("qwen3-vl:30b-a3b-instruct", TimeSpan.FromSeconds(45));
+            await _ollamaModelLifecycleService.UnloadModelAsync(_ollamaOptions.PromptPreparationModel);
+            var unloaded = await _ollamaModelLifecycleService.WaitUntilUnloadedAsync(_ollamaOptions.PromptPreparationModel, TimeSpan.FromSeconds(45));
             if (!unloaded)
             {
                 throw new InvalidOperationException("Qwen modeli bellekten cikarilamadi; WanGP video uretimi baslatilmayacak.");
@@ -987,10 +1157,16 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
             return;
         }
 
-        var sourceImage = SelectedScene.Assets.FirstOrDefault(asset => asset.IsSelected) ?? SelectedScene.Assets.FirstOrDefault();
+        var sourceImage = SelectedScene.Assets.FirstOrDefault(asset => asset.IsSelected);
         if (sourceImage is null || !File.Exists(sourceImage.FilePath))
         {
             AddLog("Video", "Once bu sahne icin ana referans gorsel secin.", GenerationLogLevel.Warning);
+            return;
+        }
+
+        if (SelectedVideoModel.InputContract is not { IsValidated: true, SupportsStartImage: true } inputContract)
+        {
+            AddLog("Video", "Secili model image-to-video destekliyor ancak WanGP Start Image sozlesmesi cozumlenemedi.", GenerationLogLevel.Error);
             return;
         }
 
@@ -1000,6 +1176,57 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         try
         {
             _activityCenter.StartOperation("VideoGenerating", FilmProjectId, ProjectName, SelectedScene.Id, SelectedScene.SceneNumber);
+            var generationMode = SceneHasDialogue(SelectedScene) ? VideoAudioGenerationMode.LtxNativeDialogue : VideoAudioGenerationMode.SilentVideo;
+            var prompt = string.IsNullOrWhiteSpace(PreparedVideoPrompt) ? SelectedScene.VideoPrompt : PreparedVideoPrompt;
+            var dialogueHash = string.Empty;
+            var nativeProfileIds = new List<int>();
+            var nativeProfileHashes = new List<string>();
+            var exactSpokenLines = new List<string>();
+            var dialogueCount = 0;
+            var speakerCount = 0;
+            if (generationMode == VideoAudioGenerationMode.LtxNativeDialogue)
+            {
+                AddLog("LTX Native", "Sahnenin DialogueJson verisi kontrol ediliyor.");
+                LogNativeModelSelection(generationMode);
+                if (SelectedVideoModel.NativeDialogueSupported != true)
+                {
+                    AddLog("LTX Native", $"Secilen video modeli LTX native audio-video uretimi icin dogrulanamadi. ModelType={SelectedVideoModel.ModelType}; Family={SelectedVideoModel.Family}; Architecture={SelectedVideoModel.Architecture}; Outputs={SelectedVideoModel.Outputs}; Installed={SelectedVideoModel.IsInstalled}; InputContract={SelectedVideoModel.InputContractValidated}; Reason={SelectedVideoModel.NativeDialogueFailureReason}", GenerationLogLevel.Error);
+                    return;
+                }
+
+                AddLog("LTX Native", "Qwen konusmali video promptunu hazirliyor.");
+                var nativePrompt = await _ltxNativeDialoguePromptComposer.BuildAsync(SelectedScene.Id, sourceImage.Id, _generationCancellation.Token);
+                AddLog("LTX Native", $"{nativePrompt.DialogueCount} Turkce replik bulundu.");
+                if (!nativePrompt.IsValid)
+                {
+                    AddLog("LTX Native", string.Join(" | ", nativePrompt.Warnings), GenerationLogLevel.Warning);
+                    return;
+                }
+
+                if (nativePrompt.DialogueCount <= 0)
+                {
+                    AddLog("LTX Native", "Native dialogue prompt olusturulamadi.", GenerationLogLevel.Error);
+                    return;
+                }
+
+                if (string.IsNullOrWhiteSpace(nativePrompt.CombinedPrompt))
+                {
+                    AddLog("LTX Native", "Native dialogue prompt olusturulamadi.", GenerationLogLevel.Error);
+                    return;
+                }
+
+                prompt = nativePrompt.CombinedPrompt;
+                dialogueHash = nativePrompt.DialogueSourceHash;
+                nativeProfileIds = nativePrompt.CharacterVoiceProfileIds;
+                nativeProfileHashes = nativePrompt.VoiceSettingsHashes;
+                exactSpokenLines = nativePrompt.ExactSpokenLines;
+                dialogueCount = nativePrompt.DialogueCount;
+                speakerCount = nativePrompt.SpeakerCount;
+                var exactHash = exactSpokenLines.Count == 0 ? string.Empty : ComputeTextHash(string.Join("|", exactSpokenLines));
+                AddLog("LTX Native", $"Exact Turkce replik dogrulandi. Count={dialogueCount}; SpeakerCount={speakerCount}; DialogueHash={dialogueHash[..12]}; TextHash={(string.IsNullOrWhiteSpace(exactHash) ? "-" : exactHash[..12])}", GenerationLogLevel.Success);
+                AddLog("LTX Native", "LTX video ve native konusma uretimi basladi.");
+            }
+
             var request = new WanGpVideoGenerationRequest
             {
                 FilmProjectId = FilmProjectId,
@@ -1007,16 +1234,30 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
                 SourceImageAssetId = sourceImage.Id,
                 SourceImagePath = sourceImage.FilePath,
                 ModelType = SelectedVideoModel.ModelType,
-                Prompt = string.IsNullOrWhiteSpace(PreparedVideoPrompt) ? SelectedScene.VideoPrompt : PreparedVideoPrompt,
+                Prompt = prompt,
                 NegativePrompt = string.IsNullOrWhiteSpace(PreparedVideoNegativePrompt) ? SelectedScene.VideoNegativePrompt : PreparedVideoNegativePrompt,
                 Resolution = SelectedVideoResolution,
-                DurationSeconds = Math.Max(1, SelectedScene.DurationSeconds),
+                DurationSeconds = generationMode == VideoAudioGenerationMode.LtxNativeDialogue ? 10 : Math.Max(1, SelectedScene.DurationSeconds),
                 InferenceSteps = VideoInferenceSteps,
                 Seed = VideoSeed,
                 RandomSeed = VideoRandomSeed,
+                InputMode = "start",
+                GenerationMode = generationMode,
+                DialogueSourceHash = dialogueHash,
+                ExactSpokenLines = exactSpokenLines,
+                CharacterVoiceProfileIds = nativeProfileIds,
+                VoiceSettingsHashes = nativeProfileHashes,
+                DialogueCount = dialogueCount,
+                SpeakerCount = speakerCount,
+                CanonicalModelType = SelectedVideoModel.NativeDialogueCanonicalModelType,
+                NativeDialogueCapabilitySupported = generationMode != VideoAudioGenerationMode.LtxNativeDialogue || SelectedVideoModel.NativeDialogueSupported,
+                NativeDialogueCapabilityFailureReason = SelectedVideoModel.NativeDialogueFailureReason,
+                NativeDialogueCapabilityEvidence = SplitEvidence(SelectedVideoModel.NativeDialogueEvidence),
+                InputContract = inputContract,
                 SettingsPatch = SelectedVideoConfiguration?.SettingsPatch ?? new Dictionary<string, object?>()
             };
-            AddLog("Video", $"Command=GenerateVideo; Service=VideoGenerationService; MediaType=Video; Model={SelectedVideoModel.ModelType}; Config={SelectedVideoConfiguration?.DisplayText ?? "-"}; SourceImageAssetId={sourceImage.Id}; SceneId={SelectedScene.Id}; ProjectId={FilmProjectId}");
+            AddLog("Video", $"QwenSourceAssetId={sourceImage.Id}; WanGPSourceAssetId={sourceImage.Id}; Equal=True; SourceSHA256={ComputeFileHash(sourceImage.FilePath)[..12]}");
+            AddLog("Video", $"Command=GenerateVideo; Service=VideoGenerationService; MediaType=Video; Mode={generationMode}; Model={SelectedVideoModel.ModelType}; Config={SelectedVideoConfiguration?.DisplayText ?? "-"}; SourceImageAssetId={sourceImage.Id}; SceneId={SelectedScene.Id}; ProjectId={FilmProjectId}");
             var progress = new Progress<MediaGenerationProgress>(OnProgressChanged);
             await _videoGenerationService.GenerateSceneVideoAsync(request, progress, _generationCancellation.Token);
             _activityCenter.CompleteOperation(GenerationJobStatus.Completed, "Video uretimi tamamlandi.");
@@ -1062,15 +1303,49 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
 
     private bool CanGenerateVideo()
     {
-        var sourceImage = SelectedScene?.Assets.FirstOrDefault(asset => asset.IsSelected) ?? SelectedScene?.Assets.FirstOrDefault();
+        var sourceImage = SelectedScene?.Assets.FirstOrDefault(asset => asset.IsSelected);
         return !IsBusy &&
             !_gpuCoordinator.IsBusy &&
             !_activityCenter.Snapshot.HasActiveOperation &&
             _activityCenter.Snapshot.McpState == WanGpMcpConnectionState.Connected &&
-            SelectedVideoModel is { IsSelectable: true } &&
+            SelectedVideoModel is { IsSelectable: true, InputContractValidated: true, SupportsStartImage: true } &&
+            (!SceneHasDialogue(SelectedScene) || SelectedVideoModel.NativeDialogueSupported) &&
+            !string.IsNullOrWhiteSpace(SelectedVideoModel.ResolvedStartImageKey) &&
             sourceImage is not null &&
             File.Exists(sourceImage.FilePath) &&
             !string.IsNullOrWhiteSpace(string.IsNullOrWhiteSpace(PreparedVideoPrompt) ? SelectedScene?.VideoPrompt : PreparedVideoPrompt);
+    }
+
+    private static bool SceneHasDialogue(ProductionSceneRowViewModel? scene)
+    {
+        if (scene is null || string.IsNullOrWhiteSpace(scene.DialogueJson))
+        {
+            return false;
+        }
+
+        var trimmed = scene.DialogueJson.Trim();
+        return trimmed != "[]" && trimmed != "{}";
+    }
+
+    private static string ComputeTextHash(string text)
+    {
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
+    }
+
+    public void NotifyVideoPreviewOpened(double? naturalDurationSeconds)
+    {
+        VideoStatus = naturalDurationSeconds is double duration
+            ? $"Video onizlemesi hazir. Sure: {duration:0.0} sn."
+            : "Video onizlemesi hazir.";
+        AddLog("Preview", "Video onizlemesi hazir.", GenerationLogLevel.Success);
+        WritePreviewSummary(mediaOpened: true, mediaFailed: false, failureMessage: string.Empty);
+    }
+
+    public void NotifyVideoPreviewFailed(string message)
+    {
+        VideoStatus = "Video uretildi ancak Windows onizleme bileseni dosyayi acamadi.";
+        AddLog("Preview", message, GenerationLogLevel.Warning);
+        WritePreviewSummary(mediaOpened: false, mediaFailed: true, failureMessage: message);
     }
 
     private static string BuildDefaultVideoNegativePrompt()
@@ -1104,6 +1379,32 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
     private void AddLog(string phase, string message, GenerationLogLevel level = GenerationLogLevel.Information)
     {
         _activityCenter.AddLog(phase, message, level);
+    }
+
+    private void ApproveLtxNativeSmoke()
+    {
+        LtxNativeSmokeApproved = true;
+        AddLog("LTX Native", "Iki sahnelik smoke testi kullanici tarafindan basarili isaretlendi.", GenerationLogLevel.Success);
+    }
+
+    private void ReportFiveMinuteBatchGate()
+    {
+        AddLog("LTX Native", LtxNativeSmokeApproved
+            ? "5 dakikalik LTX native dialogue batch icin smoke kapisi acik. Uzun sureli 30 sahne uretimi sirasiyla calistirilmalidir."
+            : "Iki sahnelik smoke basarili isaretlenmeden 30 sahne batch baslatilamaz.", GenerationLogLevel.Warning);
+    }
+
+    private void LogNativeModelSelection(VideoAudioGenerationMode generationMode)
+    {
+        var matchCount = SelectedVideoModel is null
+            ? 0
+            : InstalledVideoModels.Count(model => string.Equals(model.ModelType, SelectedVideoModel.ModelType, StringComparison.OrdinalIgnoreCase));
+        AddLog("LTX Native", $"SelectedVideoModelNull={SelectedVideoModel is null}; ModelType={SelectedVideoModel?.ModelType ?? "-"}; DisplayName={SelectedVideoModel?.DisplayName ?? "-"}; Family={SelectedVideoModel?.Family ?? "-"}; Architecture={SelectedVideoModel?.Architecture ?? "-"}; Outputs={SelectedVideoModel?.Outputs ?? "-"}; Installed={SelectedVideoModel?.IsInstalled}; Selectable={SelectedVideoModel?.IsSelectable}; I2V={SelectedVideoModel?.SupportsImageToVideo}; NativeAudio={SelectedVideoModel?.SupportsAudioOutput}; Config={SelectedVideoConfiguration?.Key ?? "-"}; Mode={generationMode}; MatchingInstalledCount={matchCount}");
+    }
+
+    private static List<string> SplitEvidence(string evidence)
+    {
+        return evidence.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
     }
 
     private bool CanGenerate()
@@ -1156,6 +1457,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         if (GenerateVideoCommand is AsyncRelayCommand generateVideoCommand) generateVideoCommand.RaiseCanExecuteChanged();
         if (SelectVideoAssetCommand is AsyncRelayCommand selectVideoCommand) selectVideoCommand.RaiseCanExecuteChanged();
         if (RefreshVideoModelsCommand is AsyncRelayCommand refreshVideoModelsCommand) refreshVideoModelsCommand.RaiseCanExecuteChanged();
+        if (GenerateFiveMinuteLtxDialogueTestCommand is RelayCommand ltxBatchCommand) ltxBatchCommand.RaiseCanExecuteChanged();
     }
 
     private void RefreshPreviewImage()
@@ -1205,6 +1507,36 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         bitmap.Freeze();
         return bitmap;
     }
+
+    private void WritePreviewSummary(bool mediaOpened, bool mediaFailed, string failureMessage)
+    {
+        try
+        {
+            var root = Path.Combine(Path.GetTempPath(), "DirectorWanGpVideoDiagnostics");
+            Directory.CreateDirectory(root);
+            var summary = new System.Text.Json.Nodes.JsonObject
+            {
+                ["capturedAt"] = DateTime.Now,
+                ["selectedVideoAssetId"] = SelectedVideoAsset?.Id,
+                ["previewUri"] = PreviewVideoUri?.AbsoluteUri,
+                ["originalOrProxy"] = "original",
+                ["mediaOpened"] = mediaOpened,
+                ["mediaFailed"] = mediaFailed,
+                ["failureMessage"] = failureMessage
+            };
+            File.WriteAllText(Path.Combine(root, "video-preview-summary.json"), summary.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // Preview diagnostics must not affect the UI.
+        }
+    }
+
+    private static string ComputeFileHash(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
 }
 
 public sealed class WanGpModelOptionViewModel
@@ -1232,6 +1564,7 @@ public sealed class WanGpVideoModelOptionViewModel
     public string DisplayText => $"{(string.IsNullOrWhiteSpace(DisplayName) ? ModelType : DisplayName)} - {ModelType}";
     public string Architecture { get; set; } = string.Empty;
     public string Family { get; set; } = string.Empty;
+    public string Outputs { get; set; } = string.Empty;
     public string Availability { get; set; } = string.Empty;
     public WanGpModelInstallStatus InstallationStatus { get; set; } = WanGpModelInstallStatus.Unknown;
     public string? CheckpointPath { get; set; }
@@ -1244,9 +1577,18 @@ public sealed class WanGpVideoModelOptionViewModel
     public bool SupportsDurationSeconds { get; set; }
     public bool SupportsFrameCount { get; set; }
     public bool SupportsFps { get; set; }
+    public string ResolvedStartImageKey { get; set; } = string.Empty;
+    public string ResolvedInputMode { get; set; } = string.Empty;
+    public bool InputContractValidated { get; set; }
+    public string InputContractEvidence { get; set; } = string.Empty;
+    public WanGpVideoInputContract? InputContract { get; set; }
+    public bool NativeDialogueSupported { get; set; }
+    public string NativeDialogueCanonicalModelType { get; set; } = string.Empty;
+    public string NativeDialogueEvidence { get; set; } = string.Empty;
+    public string NativeDialogueFailureReason { get; set; } = string.Empty;
     public List<WanGpVideoConfigurationOptionViewModel> Configurations { get; set; } = [];
     public bool IsInstalled => InstallationStatus == WanGpModelInstallStatus.Installed;
-    public bool IsSelectable => IsInstalled && SupportsImageToVideo && (SupportsStartImage || SupportsReferenceImage) && !IsImageOnly;
+    public bool IsSelectable => IsInstalled && SupportsImageToVideo && InputContractValidated && SupportsStartImage && !IsImageOnly;
     public bool IsImageOnly => ModelType.Contains("qwen_image", StringComparison.OrdinalIgnoreCase) ||
         DisplayName.Contains("qwen image", StringComparison.OrdinalIgnoreCase) ||
         DisplayName.Contains("flux", StringComparison.OrdinalIgnoreCase) ||
@@ -1275,6 +1617,7 @@ public sealed class ProductionSceneRowViewModel
     public string? SelectedImagePath { get; set; }
     public string VideoPrompt { get; set; } = string.Empty;
     public string VideoNegativePrompt { get; set; } = string.Empty;
+    public string DialogueJson { get; set; } = "[]";
     public int DurationSeconds { get; set; }
     public int ImageCount { get; set; }
     public string LastStatus { get; set; } = string.Empty;
@@ -1293,5 +1636,19 @@ public sealed class SceneMediaAssetRowViewModel
     public DateTime CreatedAt { get; set; }
     public int? Seed { get; set; }
     public double? DurationSeconds { get; set; }
+    public int? Width { get; set; }
+    public int? Height { get; set; }
+}
+
+public sealed class VideoAudioModeOptionViewModel
+{
+    public VideoAudioModeOptionViewModel(VideoAudioGenerationMode mode, string displayName)
+    {
+        Mode = mode;
+        DisplayName = displayName;
+    }
+
+    public VideoAudioGenerationMode Mode { get; }
+    public string DisplayName { get; }
 }
 

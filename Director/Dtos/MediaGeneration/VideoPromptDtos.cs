@@ -22,6 +22,10 @@ public sealed class VideoPromptCompositionRequest
     public string SceneDescription { get; set; } = string.Empty;
     public string ExistingVideoPrompt { get; set; } = string.Empty;
     public string ExistingVideoNegativePrompt { get; set; } = string.Empty;
+    public bool HasDialogue { get; set; }
+    public string DialogueJson { get; set; } = string.Empty;
+    public string DialogueSummary { get; set; } = string.Empty;
+    public string DialogueSourceHash { get; set; } = string.Empty;
     public string ContinuityFromPreviousScene { get; set; } = string.Empty;
     public string PreviousSceneTitle { get; set; } = string.Empty;
     public string PreviousSceneStoryBeat { get; set; } = string.Empty;
@@ -35,7 +39,13 @@ public sealed class VideoPromptCompositionRequest
 
 public sealed class VideoPromptCompositionResult
 {
+    public bool HasDialogue { get; set; }
     public string VideoPrompt { get; set; } = string.Empty;
+    public string DialoguePrompt { get; set; } = string.Empty;
+    public string CombinedPrompt { get; set; } = string.Empty;
+    public string SpeakerKey { get; set; } = string.Empty;
+    public string ExactDialogue { get; set; } = string.Empty;
+    public double EstimatedSpeechDurationSeconds { get; set; }
     public string VideoNegativePrompt { get; set; } = string.Empty;
     public string MotionSummary { get; set; } = string.Empty;
     public List<string> SubjectActions { get; set; } = [];

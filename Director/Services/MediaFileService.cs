@@ -20,6 +20,10 @@ public sealed class MediaFileService : IMediaFileService
     {
         ".mp4", ".webm", ".mov", ".mkv"
     };
+    private static readonly HashSet<string> AllowedAudioExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".wav", ".flac", ".mp3", ".ogg", ".m4a"
+    };
 
     private readonly WanGpOptions _options;
     private readonly IImageThumbnailService _thumbnailService;
@@ -122,6 +126,93 @@ public sealed class MediaFileService : IMediaFileService
         };
     }
 
+    public async Task<SceneMediaAsset> CopyGeneratedAudioAsync(
+        FilmScene scene,
+        GenerationJob job,
+        string sourcePath,
+        VideoMetadata metadata,
+        int versionNumber,
+        MediaAssetRole role,
+        string metadataJson,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            throw new FileNotFoundException("WanGP audio output dosyasi bulunamadi.", sourcePath);
+        }
+
+        var extension = Path.GetExtension(sourcePath);
+        if (!AllowedAudioExtensions.Contains(extension))
+        {
+            throw new InvalidOperationException($"Desteklenmeyen audio uzantisi: {extension}");
+        }
+
+        var root = Path.GetFullPath(_options.GetEffectiveOutputRootPath());
+        var relativeFolder = role is MediaAssetRole.SceneSpeechTrack or MediaAssetRole.SceneAudioMix
+            ? Path.Combine("speech", "mix")
+            : Path.Combine("speech", "segments");
+        var targetDirectory = Path.Combine(root, scene.FilmProjectId.ToString(), "scenes", scene.SceneNumber.ToString("000"), relativeFolder);
+        Directory.CreateDirectory(targetDirectory);
+
+        var (sortOrder, speakerKey) = ReadSpeechNamingParts(metadataJson);
+        var fileName = role is MediaAssetRole.SceneSpeechTrack or MediaAssetRole.SceneAudioMix
+            ? $"scene_{scene.SceneNumber:000}_speech{extension.ToLowerInvariant()}"
+            : $"{sortOrder:000}_{SanitizeFilenamePart(speakerKey)}_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}{extension.ToLowerInvariant()}";
+        var targetPath = Path.GetFullPath(Path.Combine(targetDirectory, fileName));
+        if (!targetPath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Gecersiz hedef audio yolu.");
+        }
+
+        await using (var source = File.Open(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        await using (var target = File.Create(targetPath))
+        {
+            await source.CopyToAsync(target, cancellationToken);
+        }
+
+        var fileInfo = new FileInfo(targetPath);
+        return new SceneMediaAsset
+        {
+            FilmProjectId = scene.FilmProjectId,
+            SceneId = scene.Id,
+            GenerationJobId = job.Id,
+            MediaType = MediaType.Audio,
+            Role = role,
+            FilePath = targetPath,
+            OriginalFileName = Path.GetFileName(sourcePath),
+            FileExtension = extension,
+            FileSize = fileInfo.Length,
+            DurationSeconds = metadata.DurationSeconds,
+            ModelType = job.ModelType,
+            MetadataJson = metadataJson,
+            VersionNumber = versionNumber,
+            IsSelected = role is MediaAssetRole.SceneSpeechTrack or MediaAssetRole.SceneAudioMix,
+            CreatedAt = DateTime.Now
+        };
+    }
+
+    private static (int SortOrder, string SpeakerKey) ReadSpeechNamingParts(string metadataJson)
+    {
+        try
+        {
+            var json = System.Text.Json.Nodes.JsonNode.Parse(metadataJson) as System.Text.Json.Nodes.JsonObject;
+            var sortOrder = int.TryParse(json?["sortOrder"]?.ToString(), out var parsed) ? parsed : 0;
+            var speakerKey = json?["speakerKey"]?.ToString() ?? "speaker";
+            return (sortOrder, speakerKey);
+        }
+        catch
+        {
+            return (0, "speaker");
+        }
+    }
+
+    private static string SanitizeFilenamePart(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var cleaned = new string(value.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray());
+        return string.IsNullOrWhiteSpace(cleaned) ? "speaker" : cleaned;
+    }
+
     public async Task<SceneMediaAsset> CopyGeneratedVideoAsync(
         FilmScene scene,
         GenerationJob job,
@@ -169,6 +260,7 @@ public sealed class MediaFileService : IMediaFileService
             GenerationJobId = job.Id,
             SourceMediaAssetId = sourceImageAssetId,
             MediaType = MediaType.Video,
+            Role = MediaAssetRole.GeneratedSilentVideo,
             FilePath = targetPath,
             ThumbnailPath = fallbackThumbnailPath,
             OriginalFileName = Path.GetFileName(sourcePath),

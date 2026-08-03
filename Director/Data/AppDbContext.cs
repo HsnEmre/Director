@@ -17,6 +17,10 @@ public class AppDbContext : DbContext
     public DbSet<FilmScene> FilmScenes => Set<FilmScene>();
     public DbSet<GenerationJob> GenerationJobs => Set<GenerationJob>();
     public DbSet<SceneMediaAsset> SceneMediaAssets => Set<SceneMediaAsset>();
+    public DbSet<CharacterVoiceProfile> CharacterVoiceProfiles => Set<CharacterVoiceProfile>();
+    public DbSet<SceneSpeechPlan> SceneSpeechPlans => Set<SceneSpeechPlan>();
+    public DbSet<SceneSpeechSegment> SceneSpeechSegments => Set<SceneSpeechSegment>();
+    public DbSet<LtxNativeVoiceProfile> LtxNativeVoiceProfiles => Set<LtxNativeVoiceProfile>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -235,6 +239,7 @@ public class AppDbContext : DbContext
                 .OnDelete(DeleteBehavior.NoAction);
 
             entity.Property(asset => asset.MediaType).HasConversion<int>().IsRequired();
+            entity.Property(asset => asset.Role).HasConversion<int>().HasDefaultValue(MediaAssetRole.ReferenceImage).IsRequired();
             entity.Property(asset => asset.FilePath).IsRequired().HasColumnType("nvarchar(max)");
             entity.Property(asset => asset.ThumbnailPath).HasColumnType("nvarchar(max)");
             entity.Property(asset => asset.OriginalFileName).IsRequired().HasMaxLength(260);
@@ -242,6 +247,111 @@ public class AppDbContext : DbContext
             entity.Property(asset => asset.ModelType).IsRequired().HasMaxLength(160);
             entity.Property(asset => asset.MetadataJson).IsRequired().HasColumnType("nvarchar(max)");
             entity.Property(asset => asset.CreatedAt).HasDefaultValueSql("GETDATE()").IsRequired();
+        });
+
+        modelBuilder.Entity<CharacterVoiceProfile>(entity =>
+        {
+            entity.HasKey(profile => profile.Id);
+            entity.HasIndex(profile => new { profile.FilmProjectId, profile.StoryCharacterId, profile.IsDefault });
+            entity.HasIndex(profile => new { profile.FilmProjectId, profile.IsNarrator, profile.IsDefault });
+            entity.HasIndex(profile => new { profile.FilmProjectId, profile.StoryCharacterId, profile.IsDefault, profile.IsLocked })
+                .IsUnique()
+                .HasFilter("[StoryCharacterId] IS NOT NULL AND [IsDefault] = 1 AND [IsLocked] = 1");
+
+            entity.HasOne(profile => profile.FilmProject)
+                .WithMany()
+                .HasForeignKey(profile => profile.FilmProjectId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(profile => profile.StoryCharacter)
+                .WithMany()
+                .HasForeignKey(profile => profile.StoryCharacterId)
+                .OnDelete(DeleteBehavior.NoAction);
+
+            entity.Property(profile => profile.Provider).HasConversion<int>().IsRequired();
+            entity.Property(profile => profile.ProfileName).IsRequired().HasMaxLength(160);
+            entity.Property(profile => profile.ModelType).IsRequired().HasMaxLength(160);
+            entity.Property(profile => profile.VoicePresetKey).IsRequired().HasMaxLength(160);
+            entity.Property(profile => profile.VoicePresetDisplayName).IsRequired().HasMaxLength(200);
+            entity.Property(profile => profile.Language).IsRequired().HasMaxLength(30);
+            entity.Property(profile => profile.EmotionStyle).IsRequired().HasMaxLength(120);
+            entity.Property(profile => profile.SettingsHash).IsRequired().HasMaxLength(96);
+            entity.Property(profile => profile.CreatedAt).HasDefaultValueSql("GETDATE()").IsRequired();
+        });
+
+        modelBuilder.Entity<SceneSpeechPlan>(entity =>
+        {
+            entity.HasKey(plan => plan.Id);
+            entity.HasIndex(plan => plan.SceneId).IsUnique();
+
+            entity.HasOne(plan => plan.FilmProject)
+                .WithMany()
+                .HasForeignKey(plan => plan.FilmProjectId)
+                .OnDelete(DeleteBehavior.NoAction);
+
+            entity.HasOne(plan => plan.Scene)
+                .WithOne()
+                .HasForeignKey<SceneSpeechPlan>(plan => plan.SceneId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.Property(plan => plan.Status).HasConversion<int>().IsRequired();
+            entity.Property(plan => plan.CreatedAt).HasDefaultValueSql("GETDATE()").IsRequired();
+        });
+
+        modelBuilder.Entity<SceneSpeechSegment>(entity =>
+        {
+            entity.HasKey(segment => segment.Id);
+            entity.HasIndex(segment => new { segment.SceneSpeechPlanId, segment.SortOrder });
+
+            entity.HasOne(segment => segment.SceneSpeechPlan)
+                .WithMany(plan => plan.Segments)
+                .HasForeignKey(segment => segment.SceneSpeechPlanId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(segment => segment.StoryCharacter)
+                .WithMany()
+                .HasForeignKey(segment => segment.StoryCharacterId)
+                .OnDelete(DeleteBehavior.NoAction);
+
+            entity.HasOne(segment => segment.VoiceProfile)
+                .WithMany()
+                .HasForeignKey(segment => segment.VoiceProfileId)
+                .OnDelete(DeleteBehavior.NoAction);
+
+            entity.Property(segment => segment.SpeakerType).HasConversion<int>().IsRequired();
+            entity.Property(segment => segment.SpeakerKey).IsRequired().HasMaxLength(120);
+            entity.Property(segment => segment.SourceText).IsRequired().HasColumnType("nvarchar(max)");
+            entity.Property(segment => segment.TurkishText).IsRequired().HasColumnType("nvarchar(max)");
+            entity.Property(segment => segment.Emotion).IsRequired().HasMaxLength(120);
+            entity.Property(segment => segment.Status).HasConversion<int>().IsRequired();
+            entity.Property(segment => segment.CreatedAt).HasDefaultValueSql("GETDATE()").IsRequired();
+        });
+
+        modelBuilder.Entity<LtxNativeVoiceProfile>(entity =>
+        {
+            entity.HasKey(profile => profile.Id);
+            entity.HasIndex(profile => new { profile.FilmProjectId, profile.StoryCharacterId }).IsUnique();
+
+            entity.HasOne(profile => profile.FilmProject)
+                .WithMany()
+                .HasForeignKey(profile => profile.FilmProjectId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(profile => profile.StoryCharacter)
+                .WithMany()
+                .HasForeignKey(profile => profile.StoryCharacterId)
+                .OnDelete(DeleteBehavior.NoAction);
+
+            entity.Property(profile => profile.VoiceDescription).IsRequired().HasColumnType("nvarchar(max)");
+            entity.Property(profile => profile.Language).IsRequired().HasMaxLength(30);
+            entity.Property(profile => profile.SpeakingStyle).IsRequired().HasMaxLength(160);
+            entity.Property(profile => profile.PerceivedAge).IsRequired().HasMaxLength(80);
+            entity.Property(profile => profile.GenderPresentation).IsRequired().HasMaxLength(80);
+            entity.Property(profile => profile.AccentDescription).IsRequired().HasMaxLength(180);
+            entity.Property(profile => profile.PitchDescription).IsRequired().HasMaxLength(120);
+            entity.Property(profile => profile.TempoDescription).IsRequired().HasMaxLength(120);
+            entity.Property(profile => profile.SettingsHash).IsRequired().HasMaxLength(96);
+            entity.Property(profile => profile.CreatedAt).HasDefaultValueSql("GETDATE()").IsRequired();
         });
     }
 }
