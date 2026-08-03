@@ -57,6 +57,21 @@ public sealed class VideoPromptCompositionResult
     public List<string> Warnings { get; set; } = [];
 }
 
+public sealed class LtxNativeDialogueCreativeDirectionResult
+{
+    public string PerformanceDirection { get; set; } = string.Empty;
+    public string FacialExpression { get; set; } = string.Empty;
+    public string BodyMovement { get; set; } = string.Empty;
+    public string VoiceDeliveryDirection { get; set; } = string.Empty;
+    public string CameraDirection { get; set; } = string.Empty;
+    public string EnvironmentalMotion { get; set; } = string.Empty;
+    public string TimingDirection { get; set; } = string.Empty;
+    public List<string> Warnings { get; set; } = [];
+
+    [System.Text.Json.Serialization.JsonExtensionData]
+    public Dictionary<string, System.Text.Json.JsonElement>? AdditionalFields { get; set; }
+}
+
 public sealed class VideoPromptContinuityContext
 {
     public string PreviousSceneEndingContext { get; set; } = string.Empty;

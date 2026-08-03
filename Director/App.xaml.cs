@@ -79,6 +79,7 @@ public partial class App : Application
                 services.AddSingleton<IVideoMetadataService, VideoMetadataService>();
                 services.AddSingleton<IWanGpVideoInputContractResolver, WanGpVideoInputContractResolver>();
                 services.AddSingleton<IWanGpVideoTimingContractResolver, WanGpVideoTimingContractResolver>();
+                services.AddSingleton<ILtxNativeDialogueFinalPromptBuilder, LtxNativeDialogueFinalPromptBuilder>();
                 services.AddSingleton<IWanGpVideoRequestBuilder, WanGpVideoRequestBuilder>();
                 services.AddSingleton<IWanGpAudioInputContractResolver, WanGpAudioInputContractResolver>();
                 services.AddSingleton<IWanGpAudioRequestBuilder, WanGpAudioRequestBuilder>();

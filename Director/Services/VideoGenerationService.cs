@@ -495,36 +495,43 @@ public sealed class VideoGenerationService : IVideoGenerationService
         {
             if (!request.NativeDialogueCapabilitySupported)
             {
-                throw new InvalidOperationException("Secilen video modeli LTX native audio-video uretimi icin dogrulanamadi. " +
-                    $"ModelType={request.ModelType}; Canonical={request.CanonicalModelType}; Reason={request.NativeDialogueCapabilityFailureReason}");
+                throw NativeCompatibilityFailure(request, $"Seçilen video modeli native audio-video üretimi için doğrulanamadı: {request.NativeDialogueCapabilityFailureReason}");
             }
 
             if (build.NativeAudioDisabledByRequest)
             {
-                throw new InvalidOperationException("LTX native dialogue request audio output'u devre disi birakiyor.");
+                throw NativeCompatibilityFailure(request, "WanGP isteği native audio output'u devre dışı bırakıyor.");
             }
 
             if (request.DialogueCount > 0 && string.IsNullOrWhiteSpace(request.DialogueSourceHash))
             {
-                throw new InvalidOperationException("LTX native dialogue request DialogueJson hash'i olmadan baslatilamaz.");
+                throw NativeCompatibilityFailure(request, "DialogueJson hash'i eksik.");
             }
 
-            if (string.IsNullOrWhiteSpace(request.Prompt) ||
-                !request.Prompt.Contains("speaks audibly", StringComparison.OrdinalIgnoreCase) ||
-                !request.Prompt.Contains("clear Turkish pronunciation", StringComparison.OrdinalIgnoreCase) ||
-                !request.Prompt.Contains("synchronized lip movement", StringComparison.OrdinalIgnoreCase) ||
-                request.ExactSpokenLines.Count == 0 ||
-                request.ExactSpokenLines.Any(line => !request.Prompt.Contains($"\"{line}\"", StringComparison.Ordinal)))
+            if (request.ExactSpokenLines.Count == 0 ||
+                string.IsNullOrWhiteSpace(request.NativeSpeakerDisplayName) ||
+                string.IsNullOrWhiteSpace(request.NativeVoiceDirection) ||
+                string.IsNullOrWhiteSpace(request.NativeVisualDirection))
             {
-                throw new InvalidOperationException("Native dialogue prompt olusturulamadi.");
+                throw NativeCompatibilityFailure(request, "Final prompt exact diyalog veya zorunlu native-dialogue phrase alanlarını karşılamıyor.");
             }
 
             if (build.TimingContract?.AppliedDurationSeconds != 10)
             {
-                throw new InvalidOperationException("LTX native dialogue testi 10 saniyelik klipler uretmelidir.");
+                throw NativeCompatibilityFailure(request, "Native-dialogue klip süresi 10 saniye değil.");
             }
         }
     }
+
+    private static NativeDialoguePromptCompositionException NativeCompatibilityFailure(
+        WanGpVideoGenerationRequest request,
+        string reason) =>
+        new(
+            request.FilmProjectId,
+            request.SceneId,
+            request.SceneNumber,
+            NativeDialoguePromptFailureStage.WanGpCompatibilityValidation,
+            reason);
 
     private static object BuildJobSettingsSummary(WanGpVideoGenerationRequest request, WanGpVideoRequestBuildResult build)
     {

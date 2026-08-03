@@ -16,7 +16,8 @@ public sealed class LtxNativeDialogueTests
         var builder = new WanGpVideoRequestBuilder(
             new FakeWanGpClient(Schema()),
             new WanGpVideoInputContractResolver(),
-            new WanGpVideoTimingContractResolver());
+            new WanGpVideoTimingContractResolver(),
+            new LtxNativeDialogueFinalPromptBuilder());
 
         var build = await builder.BuildAsync(Request(imagePath));
 
@@ -35,36 +36,20 @@ public sealed class LtxNativeDialogueTests
         var builder = new WanGpVideoRequestBuilder(
             new FakeWanGpClient(Schema()),
             new WanGpVideoInputContractResolver(),
-            new WanGpVideoTimingContractResolver());
+            new WanGpVideoTimingContractResolver(),
+            new LtxNativeDialogueFinalPromptBuilder());
         var request = Request(imagePath);
-        var exactLine = "Ben korkmuyorum, yolumu bulacağım.";
-        request.Prompt = string.Join("\n", new[]
-        {
-            "Single continuous shot based on the supplied start image.",
-            "Metehan moves through the forest with a steady camera.",
-            "Metehan speaks audibly in natural Turkish with clear Turkish pronunciation and a calm young Turkish male voice.",
-            "The speech has synchronized lip movement.",
-            $"Character says in Turkish: \"{exactLine}\"",
-            "Only Metehan speaks.",
-            "No narrator.",
-            "No subtitles.",
-            "No captions.",
-            "No on-screen text.",
-            "No background music.",
-            "No additional dialogue.",
-            "single continuous shot, no cuts."
-        });
-        request.ExactSpokenLines.Add(exactLine);
+        var exactLine = Assert.Single(request.ExactSpokenLines);
         request.SettingsPatch["prompt"] = "video-only movement camera environment negative prompt";
 
         var build = await builder.BuildAsync(request);
 
         var sentPrompt = Assert.IsType<string>(build.Source["prompt"]);
         Assert.Same(request.Prompt, sentPrompt);
-        Assert.Contains($"Character says in Turkish: \"{exactLine}\"", sentPrompt);
+        Assert.Contains($"Ahmet says in Turkish: \"{exactLine}\"", sentPrompt);
         Assert.Contains("speaks audibly in natural Turkish", sentPrompt);
         Assert.Contains("synchronized lip movement", sentPrompt);
-        Assert.Contains("Only Metehan speaks", sentPrompt);
+        Assert.Contains("Only Ahmet speaks", sentPrompt);
         Assert.DoesNotContain("video-only movement camera environment negative prompt", sentPrompt);
     }
 
@@ -75,7 +60,8 @@ public sealed class LtxNativeDialogueTests
         var builder = new WanGpVideoRequestBuilder(
             new FakeWanGpClient(Schema()),
             new WanGpVideoInputContractResolver(),
-            new WanGpVideoTimingContractResolver());
+            new WanGpVideoTimingContractResolver(),
+            new LtxNativeDialogueFinalPromptBuilder());
         var request = Request(imagePath);
         request.GenerationMode = VideoAudioGenerationMode.SilentVideo;
         request.Prompt = "single continuous shot, Metehan walks through the forest, no cuts";
@@ -97,14 +83,16 @@ public sealed class LtxNativeDialogueTests
         var builder = new WanGpVideoRequestBuilder(
             new FakeWanGpClient(Schema()),
             new WanGpVideoInputContractResolver(),
-            new WanGpVideoTimingContractResolver());
+            new WanGpVideoTimingContractResolver(),
+            new LtxNativeDialogueFinalPromptBuilder());
         var request = Request(imagePath);
         request.ExactSpokenLines.Clear();
         request.ExactSpokenLines.Add("Ben korkmuyorum, yolumu bulacağım.");
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => builder.BuildAsync(request));
+        var ex = await Assert.ThrowsAsync<NativeDialoguePromptCompositionException>(() => builder.BuildAsync(request));
 
-        Assert.Equal("Native dialogue prompt olusturulamadi.", ex.Message);
+        Assert.Equal(NativeDialoguePromptFailureStage.WanGpCompatibilityValidation, ex.FailureStage);
+        Assert.Contains("occurrence mismatch", ex.SafeReason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -154,7 +142,8 @@ public sealed class LtxNativeDialogueTests
         var builder = new WanGpVideoRequestBuilder(
             new FakeWanGpClient(Schema()),
             new WanGpVideoInputContractResolver(),
-            new WanGpVideoTimingContractResolver());
+            new WanGpVideoTimingContractResolver(),
+            new LtxNativeDialogueFinalPromptBuilder());
         var request = Request(imagePath);
         request.SettingsPatch["disable_audio"] = true;
 
@@ -227,36 +216,59 @@ public sealed class LtxNativeDialogueTests
     [Fact]
     public void DialogueExtractor_RejectsUnknownSpeaker()
     {
-        var ex = Assert.Throws<InvalidOperationException>(() => SpeechDialogueExtractor.Extract(
+        var ex = Assert.Throws<SpeechDialogueExtractionException>(() => SpeechDialogueExtractor.Extract(
             """[{ "speakerKey": "unknown", "text": "Merhaba." }]""",
             [Character("metehan", "Metehan")]));
 
-        Assert.Contains("DialogueJson konusmacisi StoryCharacter ile eslesmedi", ex.Message);
+        Assert.Equal(SpeechDialogueExtractionFailure.SpeakerNotFound, ex.Failure);
+        Assert.Contains("DialogueJson konuşmacısı StoryCharacter ile eşleşmedi", ex.Message);
     }
 
     private static WanGpVideoGenerationRequest Request(string imagePath)
     {
+        var speaker = new StoryCharacter
+        {
+            Id = 1,
+            CharacterKey = "ahmet",
+            Name = "Ahmet",
+            Role = "hero",
+            VoiceDescription = "clear Turkish voice"
+        };
+        var dialogue = new SpeechDialogueLine
+        {
+            StoryCharacterId = speaker.Id,
+            SpeakerKey = speaker.CharacterKey,
+            SpeakerName = speaker.Name,
+            SpokenText = "Merhaba.",
+            SourceText = "Merhaba.",
+            SortOrder = 1
+        };
+        var final = new LtxNativeDialogueFinalPromptBuilder().Build(new LtxNativeDialogueFinalPromptRequest
+        {
+            VisualDirection = "Single continuous shot based on the supplied start image.",
+            CreativeDirection = new Director.Dtos.MediaGeneration.LtxNativeDialogueCreativeDirectionResult
+            {
+                PerformanceDirection = "Restrained confidence.",
+                FacialExpression = "Focused gaze.",
+                BodyMovement = "Small forward step.",
+                VoiceDeliveryDirection = "Calm delivery.",
+                CameraDirection = "Slow push-in.",
+                EnvironmentalMotion = "Gentle background motion.",
+                TimingDirection = "Brief silence before and after.",
+                Warnings = []
+            },
+            Speaker = speaker,
+            VoiceProfile = LtxNativeDialoguePromptComposer.CreateDefaultProfile(9, speaker),
+            Dialogue = [dialogue],
+            ProjectLanguage = "Türkçe"
+        });
         return new WanGpVideoGenerationRequest
         {
             ModelType = "ltx2_22B_distilled_gguf_q4_k_m",
             SourceImagePath = imagePath,
             SourceImageAssetId = 12,
             SceneId = 34,
-            Prompt = string.Join("\n", new[]
-            {
-                "Single continuous shot based on the supplied start image.",
-                "Ahmet speaks audibly in natural Turkish with clear Turkish pronunciation and a calm Turkish voice.",
-                "The speech has synchronized lip movement.",
-                "Character says in Turkish: \"Merhaba.\"",
-                "Only Ahmet speaks.",
-                "No narrator.",
-                "No subtitles.",
-                "No captions.",
-                "No on-screen text.",
-                "No background music.",
-                "No additional dialogue.",
-                "single continuous shot, no cuts."
-            }),
+            Prompt = final.CombinedPrompt,
             Resolution = "1280x720",
             DurationSeconds = 10,
             InferenceSteps = 8,
@@ -265,6 +277,9 @@ public sealed class LtxNativeDialogueTests
             GenerationMode = VideoAudioGenerationMode.LtxNativeDialogue,
             DialogueSourceHash = new string('a', 64),
             ExactSpokenLines = ["Merhaba."],
+            NativeSpeakerDisplayName = final.SpeakerDisplayName,
+            NativeVoiceDirection = final.VoiceDirection,
+            NativeVisualDirection = final.VisualDirection,
             DialogueCount = 1,
             SpeakerCount = 1,
             InputContract = new WanGpVideoInputContract

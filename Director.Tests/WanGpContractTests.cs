@@ -141,7 +141,10 @@ public sealed class WanGpContractTests
             ]
             """;
 
-        Assert.Throws<InvalidOperationException>(() => SpeechDialogueExtractor.Extract(dialogue, [Character("character_1", "Ada")]));
+        var exception = Assert.Throws<SpeechDialogueExtractionException>(() =>
+            SpeechDialogueExtractor.Extract(dialogue, [Character("character_1", "Ada")]));
+
+        Assert.Equal(SpeechDialogueExtractionFailure.SpeakerNotFound, exception.Failure);
     }
 
     [Fact]

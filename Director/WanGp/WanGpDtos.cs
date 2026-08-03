@@ -80,6 +80,7 @@ public sealed class WanGpVideoGenerationRequest
 {
     public int FilmProjectId { get; set; }
     public int SceneId { get; set; }
+    public int SceneNumber { get; set; }
     public int SourceImageAssetId { get; set; }
     public string SourceImagePath { get; set; } = string.Empty;
     public string ModelType { get; set; } = string.Empty;
@@ -97,6 +98,10 @@ public sealed class WanGpVideoGenerationRequest
     public VideoAudioGenerationMode GenerationMode { get; set; } = VideoAudioGenerationMode.SilentVideo;
     public string DialogueSourceHash { get; set; } = string.Empty;
     public List<string> ExactSpokenLines { get; set; } = [];
+    public string NativeSpeakerDisplayName { get; set; } = string.Empty;
+    public string NativeVoiceDirection { get; set; } = string.Empty;
+    public string NativeVisualDirection { get; set; } = string.Empty;
+    public List<string> OtherCharacterDisplayNames { get; set; } = [];
     public List<int> CharacterVoiceProfileIds { get; set; } = [];
     public List<string> VoiceSettingsHashes { get; set; } = [];
     public int DialogueCount { get; set; }

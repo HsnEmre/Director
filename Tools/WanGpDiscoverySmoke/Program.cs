@@ -31,6 +31,7 @@ services.AddSingleton<IWanGpClient, WanGpMcpClient>();
 services.AddSingleton<IWanGpLocalModelInventoryService, WanGpLocalModelInventoryService>();
 services.AddSingleton<IWanGpVideoInputContractResolver, WanGpVideoInputContractResolver>();
 services.AddSingleton<IWanGpVideoTimingContractResolver, WanGpVideoTimingContractResolver>();
+services.AddSingleton<ILtxNativeDialogueFinalPromptBuilder, LtxNativeDialogueFinalPromptBuilder>();
 services.AddSingleton<IWanGpVideoRequestBuilder, WanGpVideoRequestBuilder>();
 services.AddSingleton<IWanGpAudioInputContractResolver, WanGpAudioInputContractResolver>();
 services.AddSingleton<IVideoMetadataService, VideoMetadataService>();

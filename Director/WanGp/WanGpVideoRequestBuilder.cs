@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Director.Services;
 using Director.Services.Interfaces;
 
 namespace Director.WanGp;
@@ -13,15 +14,18 @@ public sealed class WanGpVideoRequestBuilder : IWanGpVideoRequestBuilder
     private readonly IWanGpClient _wanGpClient;
     private readonly IWanGpVideoInputContractResolver _inputContractResolver;
     private readonly IWanGpVideoTimingContractResolver _timingContractResolver;
+    private readonly ILtxNativeDialogueFinalPromptBuilder _finalPromptBuilder;
 
     public WanGpVideoRequestBuilder(
         IWanGpClient wanGpClient,
         IWanGpVideoInputContractResolver inputContractResolver,
-        IWanGpVideoTimingContractResolver timingContractResolver)
+        IWanGpVideoTimingContractResolver timingContractResolver,
+        ILtxNativeDialogueFinalPromptBuilder finalPromptBuilder)
     {
         _wanGpClient = wanGpClient;
         _inputContractResolver = inputContractResolver;
         _timingContractResolver = timingContractResolver;
+        _finalPromptBuilder = finalPromptBuilder;
     }
 
     public async Task<WanGpVideoRequestBuildResult> BuildAsync(WanGpVideoGenerationRequest request, CancellationToken cancellationToken = default)
@@ -178,33 +182,43 @@ public sealed class WanGpVideoRequestBuilder : IWanGpVideoRequestBuilder
         }
     }
 
-    private static void ValidateNativeDialoguePrompt(WanGpVideoGenerationRequest request)
+    private void ValidateNativeDialoguePrompt(WanGpVideoGenerationRequest request)
     {
         if (request.DialogueCount <= 0 || string.IsNullOrWhiteSpace(request.DialogueSourceHash) || string.IsNullOrWhiteSpace(request.Prompt))
         {
-            throw new InvalidOperationException("Native dialogue prompt olusturulamadi.");
+            throw CompatibilityFailure(request, "Diyalog sayısı, DialogueJson hash'i veya final prompt eksik.");
         }
 
-        if (!request.Prompt.Contains("speaks audibly in natural Turkish", StringComparison.OrdinalIgnoreCase) ||
-            !request.Prompt.Contains("clear Turkish pronunciation", StringComparison.OrdinalIgnoreCase) ||
-            !request.Prompt.Contains("synchronized lip movement", StringComparison.OrdinalIgnoreCase) ||
-            !request.Prompt.Contains("No narrator", StringComparison.OrdinalIgnoreCase) ||
-            !request.Prompt.Contains("No subtitles", StringComparison.OrdinalIgnoreCase) ||
-            !request.Prompt.Contains("No background music", StringComparison.OrdinalIgnoreCase) ||
-            !request.Prompt.Contains("No additional dialogue", StringComparison.OrdinalIgnoreCase) ||
-            !request.Prompt.Contains("No captions", StringComparison.OrdinalIgnoreCase) ||
-            !request.Prompt.Contains("No on-screen text", StringComparison.OrdinalIgnoreCase) ||
-            !request.Prompt.Contains("single continuous shot", StringComparison.OrdinalIgnoreCase) ||
-            !request.Prompt.Contains("no cuts", StringComparison.OrdinalIgnoreCase))
+        try
         {
-            throw new InvalidOperationException("Native dialogue prompt olusturulamadi.");
+            _finalPromptBuilder.Validate(new LtxNativeDialogueFinalPromptValidationRequest
+            {
+                FilmProjectId = request.FilmProjectId,
+                SceneId = request.SceneId,
+                SceneNumber = request.SceneNumber,
+                Prompt = request.Prompt,
+                SpeakerDisplayName = request.NativeSpeakerDisplayName,
+                ExactDialogueLines = request.ExactSpokenLines,
+                VoiceDirection = request.NativeVoiceDirection,
+                VisualDirection = request.NativeVisualDirection,
+                OtherCharacterDisplayNames = request.OtherCharacterDisplayNames
+            });
         }
-
-        if (request.ExactSpokenLines.Count > 0 && !request.ExactSpokenLines.Any(line => ContainsQuotedLine(request.Prompt, line)))
+        catch (LtxNativeDialogueFinalPromptValidationException ex)
         {
-            throw new InvalidOperationException("Native dialogue prompt olusturulamadi.");
+            throw CompatibilityFailure(request, string.Join(" ", ex.Errors));
         }
     }
+
+    private static NativeDialoguePromptCompositionException CompatibilityFailure(
+        WanGpVideoGenerationRequest request,
+        string reason) =>
+        new(
+            request.FilmProjectId,
+            request.SceneId,
+            request.SceneNumber,
+            NativeDialoguePromptFailureStage.WanGpCompatibilityValidation,
+            reason);
 
     private static bool IsNativeAudioDisabled(IReadOnlyDictionary<string, object?> source)
     {

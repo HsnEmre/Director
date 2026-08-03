@@ -2,5 +2,6 @@
   <Project Path="Director/Director.csproj" />
   <Project Path="Director.Tests/Director.Tests.csproj" />
   <Project Path="Tools/StoryGenerationSmoke/StoryGenerationSmoke.csproj" />
+  <Project Path="Tools/NativeDialogueSmoke/NativeDialogueSmoke.csproj" />
   <Project Path="Tools/InterprocessLockProbe/InterprocessLockProbe.csproj" />
 </Solution>

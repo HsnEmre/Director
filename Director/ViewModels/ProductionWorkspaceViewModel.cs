@@ -15,6 +15,7 @@ using Director.Dtos.MediaGeneration;
 using Director.Enums;
 using Director.Helpers;
 using Director.Options;
+using Director.Services;
 using Director.Services.Interfaces;
 using Director.WanGp;
 using Microsoft.EntityFrameworkCore;
@@ -704,6 +705,11 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
 
     private async Task LoadScenesAsync(CancellationToken cancellationToken = default)
     {
+        if (FilmProjectId <= 0)
+        {
+            return;
+        }
+
         var selectedSceneNumber = SelectedScene?.SceneNumber;
         await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
         var rows = await db.FilmScenes
@@ -1184,6 +1190,10 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
             var exactSpokenLines = new List<string>();
             var dialogueCount = 0;
             var speakerCount = 0;
+            var nativeSpeakerDisplayName = string.Empty;
+            var nativeVoiceDirection = string.Empty;
+            var nativeVisualDirection = string.Empty;
+            var otherCharacterDisplayNames = new List<string>();
             if (generationMode == VideoAudioGenerationMode.LtxNativeDialogue)
             {
                 AddLog("LTX Native", "Sahnenin DialogueJson verisi kontrol ediliyor.");
@@ -1203,18 +1213,6 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
                     return;
                 }
 
-                if (nativePrompt.DialogueCount <= 0)
-                {
-                    AddLog("LTX Native", "Native dialogue prompt olusturulamadi.", GenerationLogLevel.Error);
-                    return;
-                }
-
-                if (string.IsNullOrWhiteSpace(nativePrompt.CombinedPrompt))
-                {
-                    AddLog("LTX Native", "Native dialogue prompt olusturulamadi.", GenerationLogLevel.Error);
-                    return;
-                }
-
                 prompt = nativePrompt.CombinedPrompt;
                 dialogueHash = nativePrompt.DialogueSourceHash;
                 nativeProfileIds = nativePrompt.CharacterVoiceProfileIds;
@@ -1222,6 +1220,10 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
                 exactSpokenLines = nativePrompt.ExactSpokenLines;
                 dialogueCount = nativePrompt.DialogueCount;
                 speakerCount = nativePrompt.SpeakerCount;
+                nativeSpeakerDisplayName = nativePrompt.SpeakerDisplayName;
+                nativeVoiceDirection = nativePrompt.VoiceDirection;
+                nativeVisualDirection = nativePrompt.VideoPrompt;
+                otherCharacterDisplayNames = nativePrompt.OtherCharacterDisplayNames;
                 var exactHash = exactSpokenLines.Count == 0 ? string.Empty : ComputeTextHash(string.Join("|", exactSpokenLines));
                 AddLog("LTX Native", $"Exact Turkce replik dogrulandi. Count={dialogueCount}; SpeakerCount={speakerCount}; DialogueHash={dialogueHash[..12]}; TextHash={(string.IsNullOrWhiteSpace(exactHash) ? "-" : exactHash[..12])}", GenerationLogLevel.Success);
                 AddLog("LTX Native", "LTX video ve native konusma uretimi basladi.");
@@ -1231,6 +1233,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
             {
                 FilmProjectId = FilmProjectId,
                 SceneId = SelectedScene.Id,
+                SceneNumber = SelectedScene.SceneNumber,
                 SourceImageAssetId = sourceImage.Id,
                 SourceImagePath = sourceImage.FilePath,
                 ModelType = SelectedVideoModel.ModelType,
@@ -1245,6 +1248,10 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
                 GenerationMode = generationMode,
                 DialogueSourceHash = dialogueHash,
                 ExactSpokenLines = exactSpokenLines,
+                NativeSpeakerDisplayName = nativeSpeakerDisplayName,
+                NativeVoiceDirection = nativeVoiceDirection,
+                NativeVisualDirection = nativeVisualDirection,
+                OtherCharacterDisplayNames = otherCharacterDisplayNames,
                 CharacterVoiceProfileIds = nativeProfileIds,
                 VoiceSettingsHashes = nativeProfileHashes,
                 DialogueCount = dialogueCount,
@@ -1268,6 +1275,14 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         {
             _activityCenter.CompleteOperation(GenerationJobStatus.Cancelled, "Video uretimi iptal edildi.");
             AddLog("Iptal", "Video uretimi iptal edildi.", GenerationLogLevel.Warning);
+        }
+        catch (NativeDialoguePromptCompositionException ex)
+        {
+            var diagnostic = string.IsNullOrWhiteSpace(ex.DiagnosticPath) ? "oluşturulamadı" : ex.DiagnosticPath;
+            var message = $"Sahne {ex.SceneNumber} için yerel diyalog istemi hazırlanamadı. Video üretimi başlatılmadı ve mevcut görseliniz korunmuştur. Neden: {ex.SafeReason}. Teknik log: {diagnostic}";
+            _activityCenter.CompleteOperation(GenerationJobStatus.Failed, message);
+            AddLog("LTX Native", $"Stage={ex.FailureStage}; {message}", GenerationLogLevel.Error);
+            VideoStatus = message;
         }
         catch (Exception ex)
         {

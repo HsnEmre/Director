@@ -11,4 +11,11 @@ public interface IOllamaFailureDiagnosticWriter
         CancellationToken cancellationToken = default);
 }
 
-public sealed record OllamaFailureContext(int FilmProjectId, int SceneNumber, string OperationName);
+public sealed record OllamaFailureContext(
+    int FilmProjectId,
+    int SceneNumber,
+    string OperationName,
+    int? SceneId = null,
+    int? StoryCharacterId = null,
+    string? CharacterKey = null,
+    string? CorrelationId = null);

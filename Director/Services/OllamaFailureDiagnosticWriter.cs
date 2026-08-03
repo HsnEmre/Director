@@ -66,7 +66,11 @@ public sealed class OllamaFailureDiagnosticWriter : IOllamaFailureDiagnosticWrit
         {
             timestamp,
             context.FilmProjectId,
+            context.SceneId,
             context.SceneNumber,
+            context.StoryCharacterId,
+            context.CharacterKey,
+            diagnosticCorrelationId = context.CorrelationId,
             operationName = context.OperationName,
             attemptType,
             selectedModel = exception.Metadata.Model,
