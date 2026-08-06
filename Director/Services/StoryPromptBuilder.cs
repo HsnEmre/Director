@@ -38,6 +38,38 @@ For each character: role must be a short story function only, maximum 80 charact
 """;
     }
 
+    public string BuildStoryBibleConciseUserPrompt(FilmProject project)
+    {
+        return $"""
+Create a concise story bible for this very small silent visual film project.
+Project name: {project.ProjectName}
+Subject: {Limit(project.Subject, 500)}
+Total duration minutes: {project.TotalDurationMinutes}
+Clip duration seconds: {project.ClipDurationSeconds}
+Exact scene count required later: {project.CalculatedClipCount}
+Language for title, logline and synopsis: {project.Language}
+Target audience: {project.TargetAudience}
+Genre: {project.StoryGenre}
+Visual style: {Limit(project.VisualStyle, 220)}
+Video style: {Limit(project.VideoStyle, 220)}
+Aspect ratio: {project.AspectRatio}
+Resolution: {project.Resolution}
+Use narrator: {project.UseNarrator}
+Main character notes: {Limit(project.MainCharacterDescription, 240)}
+Additional instructions: {Limit(project.AdditionalInstructions, 360)}
+
+Return valid JSON only. No markdown, no code fences, no explanations.
+Keep title under 12 words, logline under 30 words, synopsis under 80 words.
+Keep openingSummary, developmentSummary, climaxSummary and endingSummary under 35 words each.
+Keep worldDescription under 60 words and visualDirection under 100 words.
+Return at most 3 short continuityRules.
+If the subject has no real human, animal or creature character, return "characters": [].
+Do not invent characters for objects, streets, weather, lights, vehicles, buildings, landscapes or atmosphere.
+If a real character is explicitly required, return at most 1 character. Keep every character description concise and role under 6 words.
+No narrator, no dialogue, no speech, no lip-sync and no audio beats.
+""";
+    }
+
     public string BuildSceneOutlineSystemPrompt()
     {
         return "You are planning scene outlines for a structured AI film pipeline. Return only valid JSON matching the provided schema. Do not include markdown. The number of scenes and scene numbers must exactly match the requested range. All technical scene descriptions, scene titles, storyBeat, location, timeOfDay, continuity instructions and later production-facing fields must be written in English, regardless of the story language. Narration and dialogue are the only fields that may use the project's selected language.";
@@ -121,6 +153,8 @@ Return exactly {scenes.Count} scenes with matching sceneNumber values.
             "All technical fields must be in English. DialogueJson may contain Turkish dialogue when the story beat needs speech.\n" +
             "Do not use narrationText; return an empty string for narrationText.\n" +
             "ImagePrompt and VideoPrompt must be concise but production-ready.\n" +
+            "imageNegativePrompt and videoNegativePrompt must be short comma-separated unique terms only; never repeat a term or phrase.\n" +
+            $"For scene 1, continuityFromPreviousScene must be exactly \"{StoryGenerationService.OpeningSceneContinuityFromPreviousScene}\". For scene 2 and later, continuityFromPreviousScene must briefly describe concrete visual, spatial, temporal or action continuity from the previous scene.\n" +
             "Keep title/timeOfDay under 120 characters; descriptions, beats, prompts, negatives, continuity and dialogueJson under 900 characters each.\n" +
             "DialogueJson must be a JSON array string, for example [] or [{\"characterKey\":\"metehan\",\"characterName\":\"Mete Han\",\"text\":\"...\"}].";
     }
@@ -137,6 +171,9 @@ Return exactly {scenes.Count} scenes with matching sceneNumber values.
             .Select(character => $"{character.CharacterKey}: {character.Name}, {character.Role}. Physical: {Limit(character.PhysicalDescription, 120)} Clothing: {Limit(character.ClothingDescription, 120)} Continuity: {Limit(character.ContinuityDescription, 120)}"));
 
         var storySection = SelectStorySection(story, sceneNumber, project.CalculatedClipCount);
+        var continuityRule = sceneNumber == 1
+            ? $"continuityFromPreviousScene: exactly \"{StoryGenerationService.OpeningSceneContinuityFromPreviousScene}\"."
+            : "continuityFromPreviousScene: write one short concrete link to the previous scene's visual, spatial, temporal or action ending.";
 
         return $"""
 Create only scene {sceneNumber} of {project.CalculatedClipCount}.
@@ -148,6 +185,7 @@ Scene position: {DescribeScenePosition(sceneNumber, project.CalculatedClipCount)
 Story beat target: advance the relevant story section by one distinct beat appropriate for scene {sceneNumber}; do not repeat the previous scene.
 Target duration seconds: {project.ClipDurationSeconds}
 Previous continuity: {Limit(previousSceneContext, 500)}
+Continuity contract: {continuityRule}
 Visual style: {Limit(project.VisualStyle, 220)}
 Video style: {Limit(project.VideoStyle, 220)}
 Language: technical fields in English; dialogue text in {project.Language}.
@@ -183,7 +221,7 @@ Return one JSON object for scene {sceneNumber}. Do not include scenes before or 
         };
     }
 
-    private static string Limit(string value, int maxLength)
+    private static string Limit(string? value, int maxLength)
     {
         if (string.IsNullOrWhiteSpace(value))
         {

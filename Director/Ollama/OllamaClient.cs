@@ -142,6 +142,9 @@ public sealed class OllamaClient : IOllamaClient
             {
                 temperature = generationSettings?.Temperature ?? _options.Temperature,
                 top_p = generationSettings?.TopP ?? _options.TopP,
+                top_k = generationSettings?.TopK,
+                repeat_penalty = generationSettings?.RepeatPenalty,
+                repeat_last_n = generationSettings?.RepeatLastN,
                 num_ctx = _options.ContextLength,
                 num_predict = effectiveNumPredict
             }
@@ -153,6 +156,7 @@ public sealed class OllamaClient : IOllamaClient
         var noActivityTimeout = TimeSpan.FromSeconds(Math.Max(1, _options.SceneNoActivityTimeoutSeconds));
         var responseCharacterLimit = Math.Max(1, _options.MaxStructuredResponseCharacters);
         var contentBuilder = new StringBuilder();
+        var repetitionGuard = new OllamaRepetitionGuard(_options);
         var contentChunkCount = 0;
         var lastActivity = DateTimeOffset.UtcNow;
         var firstContentReceived = false;
@@ -254,6 +258,19 @@ public sealed class OllamaClient : IOllamaClient
                     contentBuilder.Append(contentPart);
                     contentChunkCount++;
                     lastActivity = DateTimeOffset.UtcNow;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (repetitionGuard.TryDetect(contentBuilder, out var repetition))
+                    {
+                        var repetitionMetadata = BuildMetadata(model, stopwatch.Elapsed, contentBuilder, contentChunkCount, finalChunk, generationSettings, responseCharacterLimit);
+                        repetitionMetadata.RepeatedBlockLength = repetition.BlockLength;
+                        repetitionMetadata.RepeatedBlockCount = repetition.RepeatCount;
+                        repetitionMetadata.RepeatedBlockPreview = repetition.Preview;
+                        throw new OllamaRepetitionDetectedException(
+                            $"Ollama response repetition detected. Model={model}; BlockLength={repetition.BlockLength}; RepeatCount={repetition.RepeatCount}.",
+                            contentBuilder.ToString(),
+                            repetitionMetadata);
+                    }
+
                     var stage = firstContentReceived ? OllamaStreamStage.ContentChunk : OllamaStreamStage.FirstContentChunk;
                     firstContentReceived = true;
                     ReportStream(streamProgress, stage, model, stopwatch.Elapsed, lastActivity, contentChunkCount);
@@ -349,6 +366,9 @@ public sealed class OllamaClient : IOllamaClient
         {
             Model = model,
             OperationName = generationSettings?.OperationName ?? string.Empty,
+            OutputProfile = generationSettings?.OutputProfile,
+            PromptCharacterCount = generationSettings?.PromptCharacterCount,
+            EstimatedPromptTokens = generationSettings?.EstimatedPromptTokens,
             FilmProjectId = generationSettings?.FilmProjectId,
             SceneNumber = generationSettings?.SceneNumber,
             ConfiguredResponseLimit = configuredResponseLimit,

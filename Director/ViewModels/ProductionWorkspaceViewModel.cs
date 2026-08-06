@@ -14,6 +14,7 @@ using Director.Data;
 using Director.Dtos.MediaGeneration;
 using Director.Enums;
 using Director.Helpers;
+using Director.Models;
 using Director.Options;
 using Director.Services;
 using Director.Services.Interfaces;
@@ -36,6 +37,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
     private readonly ILtxNativeDialoguePromptComposer _ltxNativeDialoguePromptComposer;
     private readonly IOllamaModelLifecycleService _ollamaModelLifecycleService;
     private readonly IVideoGenerationService _videoGenerationService;
+    private readonly IVideoGenerationRequestFactory _videoGenerationRequestFactory;
     private readonly ILtxNativeDialogueCapabilityResolver _ltxNativeDialogueCapabilityResolver;
     private readonly IGpuGenerationCoordinator _gpuCoordinator;
     private readonly IApplicationActivityCenter _activityCenter;
@@ -88,6 +90,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         ILtxNativeDialoguePromptComposer ltxNativeDialoguePromptComposer,
         IOllamaModelLifecycleService ollamaModelLifecycleService,
         IVideoGenerationService videoGenerationService,
+        IVideoGenerationRequestFactory videoGenerationRequestFactory,
         ILtxNativeDialogueCapabilityResolver ltxNativeDialogueCapabilityResolver,
         AudioProductionViewModel audioProduction,
         IGpuGenerationCoordinator gpuCoordinator,
@@ -106,6 +109,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         _ltxNativeDialoguePromptComposer = ltxNativeDialoguePromptComposer;
         _ollamaModelLifecycleService = ollamaModelLifecycleService;
         _videoGenerationService = videoGenerationService;
+        _videoGenerationRequestFactory = videoGenerationRequestFactory;
         _ltxNativeDialogueCapabilityResolver = ltxNativeDialogueCapabilityResolver;
         Audio = audioProduction;
         _gpuCoordinator = gpuCoordinator;
@@ -1130,7 +1134,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         {
             _activityCenter.CompleteOperation(GenerationJobStatus.Failed, ex.Message);
             AddLog("Hata", ex.Message, GenerationLogLevel.Error);
-            throw;
+            VideoStatus = ex.Message;
         }
         finally
         {
@@ -1183,88 +1187,50 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         {
             _activityCenter.StartOperation("VideoGenerating", FilmProjectId, ProjectName, SelectedScene.Id, SelectedScene.SceneNumber);
             var generationMode = SceneHasDialogue(SelectedScene) ? VideoAudioGenerationMode.LtxNativeDialogue : VideoAudioGenerationMode.SilentVideo;
-            var prompt = string.IsNullOrWhiteSpace(PreparedVideoPrompt) ? SelectedScene.VideoPrompt : PreparedVideoPrompt;
-            var dialogueHash = string.Empty;
-            var nativeProfileIds = new List<int>();
-            var nativeProfileHashes = new List<string>();
-            var exactSpokenLines = new List<string>();
-            var dialogueCount = 0;
-            var speakerCount = 0;
-            var nativeSpeakerDisplayName = string.Empty;
-            var nativeVoiceDirection = string.Empty;
-            var nativeVisualDirection = string.Empty;
-            var otherCharacterDisplayNames = new List<string>();
-            if (generationMode == VideoAudioGenerationMode.LtxNativeDialogue)
+            if (generationMode == VideoAudioGenerationMode.LtxNativeDialogue && SelectedVideoModel.NativeDialogueSupported != true)
             {
-                AddLog("LTX Native", "Sahnenin DialogueJson verisi kontrol ediliyor.");
                 LogNativeModelSelection(generationMode);
-                if (SelectedVideoModel.NativeDialogueSupported != true)
-                {
-                    AddLog("LTX Native", $"Secilen video modeli LTX native audio-video uretimi icin dogrulanamadi. ModelType={SelectedVideoModel.ModelType}; Family={SelectedVideoModel.Family}; Architecture={SelectedVideoModel.Architecture}; Outputs={SelectedVideoModel.Outputs}; Installed={SelectedVideoModel.IsInstalled}; InputContract={SelectedVideoModel.InputContractValidated}; Reason={SelectedVideoModel.NativeDialogueFailureReason}", GenerationLogLevel.Error);
-                    return;
-                }
-
-                AddLog("LTX Native", "Qwen konusmali video promptunu hazirliyor.");
-                var nativePrompt = await _ltxNativeDialoguePromptComposer.BuildAsync(SelectedScene.Id, sourceImage.Id, _generationCancellation.Token);
-                AddLog("LTX Native", $"{nativePrompt.DialogueCount} Turkce replik bulundu.");
-                if (!nativePrompt.IsValid)
-                {
-                    AddLog("LTX Native", string.Join(" | ", nativePrompt.Warnings), GenerationLogLevel.Warning);
-                    return;
-                }
-
-                prompt = nativePrompt.CombinedPrompt;
-                dialogueHash = nativePrompt.DialogueSourceHash;
-                nativeProfileIds = nativePrompt.CharacterVoiceProfileIds;
-                nativeProfileHashes = nativePrompt.VoiceSettingsHashes;
-                exactSpokenLines = nativePrompt.ExactSpokenLines;
-                dialogueCount = nativePrompt.DialogueCount;
-                speakerCount = nativePrompt.SpeakerCount;
-                nativeSpeakerDisplayName = nativePrompt.SpeakerDisplayName;
-                nativeVoiceDirection = nativePrompt.VoiceDirection;
-                nativeVisualDirection = nativePrompt.VideoPrompt;
-                otherCharacterDisplayNames = nativePrompt.OtherCharacterDisplayNames;
-                var exactHash = exactSpokenLines.Count == 0 ? string.Empty : ComputeTextHash(string.Join("|", exactSpokenLines));
-                AddLog("LTX Native", $"Exact Turkce replik dogrulandi. Count={dialogueCount}; SpeakerCount={speakerCount}; DialogueHash={dialogueHash[..12]}; TextHash={(string.IsNullOrWhiteSpace(exactHash) ? "-" : exactHash[..12])}", GenerationLogLevel.Success);
-                AddLog("LTX Native", "LTX video ve native konusma uretimi basladi.");
+                AddLog("LTX Native", $"Secilen video modeli LTX native audio-video uretimi icin dogrulanamadi. ModelType={SelectedVideoModel.ModelType}; Family={SelectedVideoModel.Family}; Architecture={SelectedVideoModel.Architecture}; Outputs={SelectedVideoModel.Outputs}; Installed={SelectedVideoModel.IsInstalled}; InputContract={SelectedVideoModel.InputContractValidated}; Reason={SelectedVideoModel.NativeDialogueFailureReason}", GenerationLogLevel.Error);
+                return;
             }
 
-            var request = new WanGpVideoGenerationRequest
+            if (generationMode == VideoAudioGenerationMode.LtxNativeDialogue)
+            {
+                AddLog("LTX Native", "Qwen konusmali video promptunu reusable factory uzerinden hazirliyor.");
+            }
+
+            var request = await _videoGenerationRequestFactory.CreateAsync(new VideoGenerationRequestFactoryInput
             {
                 FilmProjectId = FilmProjectId,
-                SceneId = SelectedScene.Id,
-                SceneNumber = SelectedScene.SceneNumber,
-                SourceImageAssetId = sourceImage.Id,
-                SourceImagePath = sourceImage.FilePath,
+                Scene = new FilmScene
+                {
+                    Id = SelectedScene.Id,
+                    FilmProjectId = FilmProjectId,
+                    SceneNumber = SelectedScene.SceneNumber,
+                    DurationSeconds = SelectedScene.DurationSeconds,
+                    VideoPrompt = SelectedScene.VideoPrompt,
+                    VideoNegativePrompt = SelectedScene.VideoNegativePrompt,
+                    DialogueJson = SelectedScene.DialogueJson
+                },
+                SourceImageAsset = new SceneMediaAsset
+                {
+                    Id = sourceImage.Id,
+                    FilmProjectId = FilmProjectId,
+                    SceneId = SelectedScene.Id,
+                    FilePath = sourceImage.FilePath
+                },
                 ModelType = SelectedVideoModel.ModelType,
-                Prompt = prompt,
-                NegativePrompt = string.IsNullOrWhiteSpace(PreparedVideoNegativePrompt) ? SelectedScene.VideoNegativePrompt : PreparedVideoNegativePrompt,
                 Resolution = SelectedVideoResolution,
-                DurationSeconds = generationMode == VideoAudioGenerationMode.LtxNativeDialogue ? 10 : Math.Max(1, SelectedScene.DurationSeconds),
                 InferenceSteps = VideoInferenceSteps,
                 Seed = VideoSeed,
                 RandomSeed = VideoRandomSeed,
-                InputMode = "start",
-                GenerationMode = generationMode,
-                DialogueSourceHash = dialogueHash,
-                ExactSpokenLines = exactSpokenLines,
-                NativeSpeakerDisplayName = nativeSpeakerDisplayName,
-                NativeVoiceDirection = nativeVoiceDirection,
-                NativeVisualDirection = nativeVisualDirection,
-                OtherCharacterDisplayNames = otherCharacterDisplayNames,
-                CharacterVoiceProfileIds = nativeProfileIds,
-                VoiceSettingsHashes = nativeProfileHashes,
-                DialogueCount = dialogueCount,
-                SpeakerCount = speakerCount,
-                CanonicalModelType = SelectedVideoModel.NativeDialogueCanonicalModelType,
-                NativeDialogueCapabilitySupported = generationMode != VideoAudioGenerationMode.LtxNativeDialogue || SelectedVideoModel.NativeDialogueSupported,
-                NativeDialogueCapabilityFailureReason = SelectedVideoModel.NativeDialogueFailureReason,
-                NativeDialogueCapabilityEvidence = SplitEvidence(SelectedVideoModel.NativeDialogueEvidence),
-                InputContract = inputContract,
+                PreferNativeDialogue = generationMode == VideoAudioGenerationMode.LtxNativeDialogue,
+                PromptOverride = string.IsNullOrWhiteSpace(PreparedVideoPrompt) ? null : PreparedVideoPrompt,
+                NegativePromptOverride = string.IsNullOrWhiteSpace(PreparedVideoNegativePrompt) ? null : PreparedVideoNegativePrompt,
                 SettingsPatch = SelectedVideoConfiguration?.SettingsPatch ?? new Dictionary<string, object?>()
-            };
+            }, _generationCancellation.Token);
             AddLog("Video", $"QwenSourceAssetId={sourceImage.Id}; WanGPSourceAssetId={sourceImage.Id}; Equal=True; SourceSHA256={ComputeFileHash(sourceImage.FilePath)[..12]}");
-            AddLog("Video", $"Command=GenerateVideo; Service=VideoGenerationService; MediaType=Video; Mode={generationMode}; Model={SelectedVideoModel.ModelType}; Config={SelectedVideoConfiguration?.DisplayText ?? "-"}; SourceImageAssetId={sourceImage.Id}; SceneId={SelectedScene.Id}; ProjectId={FilmProjectId}");
+            AddLog("Video", $"Command=GenerateVideo; Service=VideoGenerationService; MediaType=Video; Mode={request.GenerationMode}; Model={request.ModelType}; Config={SelectedVideoConfiguration?.DisplayText ?? "-"}; SourceImageAssetId={sourceImage.Id}; SceneId={SelectedScene.Id}; ProjectId={FilmProjectId}");
             var progress = new Progress<MediaGenerationProgress>(OnProgressChanged);
             await _videoGenerationService.GenerateSceneVideoAsync(request, progress, _generationCancellation.Token);
             _activityCenter.CompleteOperation(GenerationJobStatus.Completed, "Video uretimi tamamlandi.");
@@ -1286,9 +1252,13 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            _activityCenter.CompleteOperation(GenerationJobStatus.Failed, ex.Message);
-            AddLog("Hata", ex.Message, GenerationLogLevel.Error);
-            throw;
+            var safeReason = BuildSafeVideoGenerationFailureReason(ex);
+            var message = "Video WanGP tarafindan uretildi ancak uygulama medya klasorune aktarilirken final cikti dogrulanamadi. Mevcut WanGP ciktisi korunmustur. Yeniden uretmeden kurtarma denenebilir. Teknik ayrinti: " + safeReason;
+            PreviewVideoUri = null;
+            OnPropertyChanged(nameof(VideoPreviewSource));
+            _activityCenter.CompleteOperation(GenerationJobStatus.Failed, message);
+            AddLog("Hata", message, GenerationLogLevel.Error);
+            VideoStatus = message;
         }
         finally
         {
@@ -1309,6 +1279,20 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
         await _videoGenerationService.SetSelectedVideoAssetAsync(SelectedVideoAsset.Id);
         await LoadScenesAsync();
         AddLog("Video", "Secili video guncellendi.", GenerationLogLevel.Success);
+    }
+
+    private static string BuildSafeVideoGenerationFailureReason(Exception exception)
+    {
+        return exception switch
+        {
+            WanGpOutputFinalizationTimeoutException => "WanGP video islemi tamamlandi veya cikti olusturdu, ancak final medya dosyasi uygulama tarafindan dogrulanamadi. Mevcut WanGP ciktilari korunmustur; yeniden uretmeden kurtarma denenebilir.",
+            WanGpAmbiguousOutputException => "Birden fazla olasi WanGP final output bulundu.",
+            WanGpToolContractException => "WanGP MCP tool contract eksik.",
+            WanGpMcpTransportException => "WanGP job polling kesildi; mevcut ciktilar korunmustur ve recovery denenebilir.",
+            FileNotFoundException => "Beklenen final medya dosyasi bulunamadi.",
+            IOException => "Medya dosyasi Director klasorune aktarilamadi.",
+            _ => string.IsNullOrWhiteSpace(exception.Message) ? exception.GetType().Name : exception.Message
+        };
     }
 
     private bool CanPrepareVideoPrompt()

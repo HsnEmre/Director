@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -67,10 +68,16 @@ public sealed class VideoGenerationService : IVideoGenerationService
         try
         {
             var reference = await LoadSelectedReferenceAssetAsync(scene, request.SourceImageAssetId, cancellationToken);
-            var beforeSnapshot = _outputResolver.CaptureSnapshot();
+            var readiness = await _wanGpClient.TestConnectionAsync(cancellationToken);
+            if (!readiness.IsAvailable)
+            {
+                throw new InvalidOperationException(readiness.Message);
+            }
+
             var build = await _requestBuilder.BuildAsync(request, cancellationToken);
             AssertImageToVideoRequest(request, build, reference);
             _activityCenter.AddLog("Video", "Referans gorsel WanGP Start Image alanina eklendi.", GenerationLogLevel.Success);
+            var beforeSnapshot = _outputResolver.CaptureSnapshot();
             job = await CreateJobAsync(scene, reference.Id, request, build, cancellationToken);
             _activityCenter.SetActiveJob(job.Id, null);
 
@@ -82,6 +89,7 @@ public sealed class VideoGenerationService : IVideoGenerationService
                 scene.Id,
                 cancellationToken))
             {
+            var submittedAt = DateTime.Now;
             submission = await _wanGpClient.SubmitVideoGenerationAsync(build.Source, cancellationToken);
             if (string.IsNullOrWhiteSpace(submission.ExternalJobId))
             {
@@ -98,14 +106,14 @@ public sealed class VideoGenerationService : IVideoGenerationService
             {
                 existing.ExternalJobId = submission.ExternalJobId;
                 existing.Status = GenerationJobStatus.Running;
-                existing.StartedAt = DateTime.Now;
+                existing.StartedAt = submittedAt;
                 existing.CurrentPhase = "VideoGenerating";
                 existing.UpdatedAt = DateTime.Now;
             }, cancellationToken);
 
             progress?.Report(new MediaGenerationProgress { Phase = "VideoGenerating", Message = $"Sahne {scene.SceneNumber} video uretimi baslatildi.", OverallProgress = 5, ExternalJobId = submission.ExternalJobId });
 
-            snapshot = await PollUntilVideoOutputAsync(job.Id, submission.ExternalJobId, scene.SceneNumber, beforeSnapshot, job.StartedAt ?? job.CreatedAt, progress, cancellationToken);
+            snapshot = await PollUntilVideoOutputAsync(job.Id, submission.ExternalJobId, scene.SceneNumber, beforeSnapshot, submittedAt, progress, cancellationToken);
             }
             if (snapshot.Status != GenerationJobStatus.Completed)
             {
@@ -114,6 +122,7 @@ public sealed class VideoGenerationService : IVideoGenerationService
                     existing.Status = snapshot.Status;
                     existing.ErrorMessage = snapshot.Message;
                     existing.CompletedAt = DateTime.Now;
+                    existing.CurrentPhase = TerminalPhaseFor(snapshot.Status, existing.CurrentPhase);
                     existing.UpdatedAt = DateTime.Now;
                 }, cancellationToken);
                 return await LoadJobAsync(job.Id, cancellationToken);
@@ -207,12 +216,59 @@ public sealed class VideoGenerationService : IVideoGenerationService
         CancellationToken cancellationToken)
     {
         var delay = TimeSpan.FromSeconds(1);
+        var transientPollingFailures = 0;
+        WanGpJobSnapshot? lastSnapshot = null;
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(60));
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
         while (true)
         {
             linked.Token.ThrowIfCancellationRequested();
-            var snapshot = await _wanGpClient.GetJobAsync(externalJobId, linked.Token);
+            WanGpJobSnapshot snapshot;
+            try
+            {
+                snapshot = await _wanGpClient.GetJobAsync(externalJobId, linked.Token);
+                transientPollingFailures = 0;
+                lastSnapshot = snapshot;
+            }
+            catch (Exception ex) when (!linked.Token.IsCancellationRequested && IsTransientWanGpPollingFailure(ex))
+            {
+                transientPollingFailures++;
+                progress?.Report(new MediaGenerationProgress
+                {
+                    Phase = "VideoStatusReconciling",
+                    Message = $"Sahne {sceneNumber} video durumu dogrulaniyor; MCP polling gecici olarak kesildi.",
+                    OverallProgress = Math.Max(lastSnapshot?.ProgressPercentage ?? 0, 5),
+                    ExternalJobId = externalJobId
+                });
+
+                var reconciled = await TryResolveFilesystemOutputAsync(
+                    jobId,
+                    externalJobId,
+                    sceneNumber,
+                    beforeSnapshot,
+                    startedAt,
+                    lastSnapshot,
+                    transientPollingFailures >= 3 ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(2),
+                    linked.Token);
+                if (reconciled is not null)
+                {
+                    return reconciled;
+                }
+
+                if (transientPollingFailures >= 3)
+                {
+                    return new WanGpJobSnapshot
+                    {
+                        ExternalJobId = externalJobId,
+                        Status = GenerationJobStatus.Failed,
+                        Message = "WanGP job polling kesildi; output directory reconciliation final medya bulamadi.",
+                        Phase = "VideoStatusUnknown"
+                    };
+                }
+
+                await Task.Delay(delay, linked.Token);
+                continue;
+            }
             progress?.Report(new MediaGenerationProgress
             {
                 Phase = string.IsNullOrWhiteSpace(snapshot.Phase) ? snapshot.Status.ToString() : snapshot.Phase,
@@ -229,20 +285,31 @@ public sealed class VideoGenerationService : IVideoGenerationService
                 explicitPaths.Add(snapshot.OutputPath);
             }
 
-            var output = await _outputResolver.ResolveVideoOutputsAsync(beforeSnapshot, startedAt, explicitPaths, TimeSpan.FromSeconds(1), linked.Token);
+            var output = await _outputResolver.ResolveVideoOutputsAsync(
+                beforeSnapshot,
+                startedAt,
+                explicitPaths,
+                TimeSpan.FromSeconds(1),
+                externalJobId,
+                jobId,
+                sceneId: null,
+                seed: snapshot.Seed,
+                completedAt: snapshot.Status == GenerationJobStatus.Completed ? snapshot.CompletedAt ?? DateTime.Now : null,
+                requireAudio: false,
+                cancellationToken: linked.Token);
             if (output.Success)
             {
                 var paths = output.Candidates.Select(item => item.FilePath).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 linked.Token.ThrowIfCancellationRequested();
                 snapshot.Status = GenerationJobStatus.Completed;
-                snapshot.Message = "VideoOutputResolvedBeforeMcpTerminalState";
+                snapshot.Message = "VideoOutputResolved";
                 snapshot.OutputPath = paths.FirstOrDefault();
                 snapshot.GeneratedFiles = paths;
                 await UpdateJobAsync(jobId, job =>
                 {
-                    job.Status = GenerationJobStatus.Completed;
+                    job.Status = GenerationJobStatus.Running;
                     job.ProgressPercentage = Math.Max(job.ProgressPercentage, 95);
-                    job.CurrentPhase = "VideoOutputResolving";
+                    job.CurrentPhase = "VideoOutputImporting";
                     job.UpdatedAt = DateTime.Now;
                 }, linked.Token);
                 return snapshot;
@@ -255,7 +322,35 @@ public sealed class VideoGenerationService : IVideoGenerationService
                 return snapshot;
             }
 
-            if (snapshot.Status is GenerationJobStatus.Completed or GenerationJobStatus.Failed or GenerationJobStatus.Cancelled or GenerationJobStatus.Interrupted)
+            if (snapshot.Status == GenerationJobStatus.Completed)
+            {
+                var terminalOutput = await _outputResolver.ResolveVideoOutputsAsync(
+                    beforeSnapshot,
+                    startedAt,
+                    explicitPaths,
+                    TimeSpan.FromSeconds(30),
+                externalJobId,
+                jobId,
+                sceneId: null,
+                seed: snapshot.Seed,
+                completedAt: snapshot.CompletedAt ?? DateTime.Now,
+                requireAudio: false,
+                cancellationToken: linked.Token);
+                if (terminalOutput.Success)
+                {
+                    var paths = terminalOutput.Candidates.Select(item => item.FilePath).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                    snapshot.OutputPath = paths.FirstOrDefault();
+                    snapshot.GeneratedFiles = paths;
+                    snapshot.Message = "VideoOutputResolvedAfterMcpTerminalState";
+                    return snapshot;
+                }
+
+                snapshot.Status = GenerationJobStatus.Failed;
+                snapshot.Message = terminalOutput.Message;
+                return snapshot;
+            }
+
+            if (snapshot.Status is GenerationJobStatus.Failed or GenerationJobStatus.Cancelled or GenerationJobStatus.Interrupted)
             {
                 return snapshot;
             }
@@ -263,6 +358,64 @@ public sealed class VideoGenerationService : IVideoGenerationService
             await Task.Delay(delay, linked.Token);
         }
     }
+
+    private async Task<WanGpJobSnapshot?> TryResolveFilesystemOutputAsync(
+        int jobId,
+        string externalJobId,
+        int sceneNumber,
+        WanGpOutputSnapshot beforeSnapshot,
+        DateTime startedAt,
+        WanGpJobSnapshot? lastSnapshot,
+        TimeSpan maxWait,
+        CancellationToken cancellationToken)
+    {
+        var explicitPaths = lastSnapshot?.GeneratedFiles.ToList() ?? [];
+        if (!string.IsNullOrWhiteSpace(lastSnapshot?.OutputPath))
+        {
+            explicitPaths.Add(lastSnapshot.OutputPath);
+        }
+
+        var output = await _outputResolver.ResolveVideoOutputsAsync(
+            beforeSnapshot,
+            startedAt,
+            explicitPaths,
+            maxWait,
+            externalJobId,
+            jobId,
+            sceneId: null,
+            seed: lastSnapshot?.Seed,
+            completedAt: lastSnapshot?.CompletedAt,
+            requireAudio: false,
+            cancellationToken: cancellationToken);
+        if (!output.Success)
+        {
+            return null;
+        }
+
+        var paths = output.Candidates.Select(item => item.FilePath).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        await UpdateJobAsync(jobId, job =>
+        {
+            job.Status = GenerationJobStatus.Running;
+            job.ProgressPercentage = Math.Max(job.ProgressPercentage, 95);
+            job.CurrentPhase = "VideoOutputImporting";
+            job.UpdatedAt = DateTime.Now;
+        }, cancellationToken);
+
+        return new WanGpJobSnapshot
+        {
+            ExternalJobId = externalJobId,
+            Status = GenerationJobStatus.Completed,
+            Phase = "VideoOutputImporting",
+            Message = "VideoOutputResolvedAfterPollingInterruption",
+            OutputPath = paths.FirstOrDefault(),
+            GeneratedFiles = paths,
+            ProgressPercentage = 95
+        };
+    }
+
+    private static bool IsTransientWanGpPollingFailure(Exception exception) =>
+        exception is WanGpMcpTransportException or HttpRequestException or IOException or TimeoutException ||
+        exception.GetType().Name.Contains("Transport", StringComparison.OrdinalIgnoreCase);
 
     private async Task<SceneMediaAsset> SaveCompletedVideoAssetAsync(int sceneId, int jobId, int sourceImageAssetId, string outputPath, WanGpVideoGenerationRequest request, CancellationToken cancellationToken)
     {
@@ -371,6 +524,20 @@ public sealed class VideoGenerationService : IVideoGenerationService
         }
 
         return null;
+    }
+
+    private static string TerminalPhaseFor(GenerationJobStatus status, string fallback)
+    {
+        return status switch
+        {
+            GenerationJobStatus.Completed => "Completed",
+            GenerationJobStatus.Failed => "Failed",
+            GenerationJobStatus.Cancelled => "Cancelled",
+            GenerationJobStatus.Interrupted => "Interrupted",
+            _ => string.IsNullOrWhiteSpace(fallback) || fallback.Equals("Running", StringComparison.OrdinalIgnoreCase)
+                ? status.ToString()
+                : fallback
+        };
     }
 
     private async Task<FilmScene> LoadSceneAsync(int sceneId, CancellationToken cancellationToken)
@@ -654,6 +821,7 @@ public sealed class VideoGenerationService : IVideoGenerationService
                 existing.Status = GenerationJobStatus.Cancelled;
                 existing.CancelRequestedAt = DateTime.Now;
                 existing.CompletedAt = DateTime.Now;
+                existing.CurrentPhase = "Cancelled";
                 existing.UpdatedAt = DateTime.Now;
             }, cleanup.Token);
         }
@@ -673,6 +841,7 @@ public sealed class VideoGenerationService : IVideoGenerationService
                 existing.Status = GenerationJobStatus.Failed;
                 existing.ErrorMessage = errorMessage;
                 existing.CompletedAt = DateTime.Now;
+                existing.CurrentPhase = "OutputImportFailed";
                 existing.UpdatedAt = DateTime.Now;
             }, cleanup.Token);
         }

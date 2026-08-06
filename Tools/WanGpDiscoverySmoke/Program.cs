@@ -27,7 +27,7 @@ var configuration = new ConfigurationBuilder()
 var services = new ServiceCollection();
 services.AddLogging(builder => builder.AddConsole().SetMinimumLevel(LogLevel.Warning));
 services.Configure<WanGpOptions>(configuration.GetSection("WanGp"));
-services.AddSingleton<IWanGpClient, WanGpMcpClient>();
+services.AddSingleton<IWanGpClient, WanGpStableMcpClient>();
 services.AddSingleton<IWanGpLocalModelInventoryService, WanGpLocalModelInventoryService>();
 services.AddSingleton<IWanGpVideoInputContractResolver, WanGpVideoInputContractResolver>();
 services.AddSingleton<IWanGpVideoTimingContractResolver, WanGpVideoTimingContractResolver>();
@@ -35,6 +35,7 @@ services.AddSingleton<ILtxNativeDialogueFinalPromptBuilder, LtxNativeDialogueFin
 services.AddSingleton<IWanGpVideoRequestBuilder, WanGpVideoRequestBuilder>();
 services.AddSingleton<IWanGpAudioInputContractResolver, WanGpAudioInputContractResolver>();
 services.AddSingleton<IVideoMetadataService, VideoMetadataService>();
+services.AddSingleton<IWanGpFinalOutputResolver, WanGpFinalOutputResolver>();
 services.AddSingleton<IWanGpAudioRequestBuilder, WanGpAudioRequestBuilder>();
 services.AddSingleton<IWanGpAudioOutputResolver, WanGpAudioOutputResolver>();
 
@@ -190,7 +191,13 @@ if (args.Length > 0 && string.Equals(args[0], "audio-generate", StringComparison
             explicitPaths.Add(snapshot.OutputPath);
         }
 
-        var output = await outputResolver.ResolveAudioOutputsAsync(before, startedAt, explicitPaths, TimeSpan.FromSeconds(1), timeout.Token);
+        var output = await outputResolver.ResolveAudioOutputsAsync(
+            before,
+            startedAt,
+            explicitPaths,
+            TimeSpan.FromSeconds(1),
+            submission.ExternalJobId,
+            cancellationToken: timeout.Token);
         if (output.Success)
         {
             var candidate = output.Candidates.First();

@@ -7,6 +7,7 @@ public interface IStoryPromptBuilder
 {
     string BuildStoryBibleSystemPrompt();
     string BuildStoryBibleUserPrompt(FilmProject project);
+    string BuildStoryBibleConciseUserPrompt(FilmProject project);
 
     string BuildSceneOutlineSystemPrompt();
     string BuildSceneOutlineUserPrompt(

@@ -24,6 +24,7 @@ public class FilmProject
     public string Resolution { get; set; } = "1920x1080";
 
     public bool UseNarrator { get; set; }
+    public bool AutonomousModeEnabled { get; set; }
     public string? NarratorTone { get; set; }
 
     public string? MainCharacterDescription { get; set; }
@@ -38,4 +39,5 @@ public class FilmProject
     public ICollection<FilmScene> Scenes { get; set; } = new List<FilmScene>();
     public ICollection<GenerationJob> GenerationJobs { get; set; } = new List<GenerationJob>();
     public ICollection<SceneMediaAsset> MediaAssets { get; set; } = new List<SceneMediaAsset>();
+    public ICollection<AutonomousGenerationRun> AutonomousGenerationRuns { get; set; } = new List<AutonomousGenerationRun>();
 }

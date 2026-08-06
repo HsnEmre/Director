@@ -58,7 +58,6 @@ public static class StoryCharacterFieldValidator
         var issues = new List<StoryCharacterValidationIssue>();
         if (bible.Characters.Count == 0)
         {
-            issues.Add(new StoryCharacterValidationIssue(0, string.Empty, "characters", 0, 1, "At least one character is required."));
             return issues;
         }
 

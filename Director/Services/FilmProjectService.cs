@@ -91,7 +91,24 @@ public class FilmProjectService : IFilmProjectService
                 CreatedAt = project.CreatedAt,
                 UpdatedAt = project.UpdatedAt,
                 HasStory = project.Story != null,
-                GeneratedSceneCount = project.Scenes.Count
+                GeneratedSceneCount = project.Scenes.Count,
+                HasAutonomousGenerationRun = project.AutonomousGenerationRuns.Any(),
+                AutonomousGenerationStatus = project.AutonomousGenerationRuns
+                    .OrderByDescending(run => run.StartedAtUtc)
+                    .Select(run => (AutonomousGenerationRunStatus?)run.Status)
+                    .FirstOrDefault(),
+                AutonomousGenerationStage = project.AutonomousGenerationRuns
+                    .OrderByDescending(run => run.StartedAtUtc)
+                    .Select(run => (AutonomousGenerationStage?)run.CurrentStage)
+                    .FirstOrDefault(),
+                AutonomousGenerationProgressPercentage = project.AutonomousGenerationRuns
+                    .OrderByDescending(run => run.StartedAtUtc)
+                    .Select(run => run.OverallProgressPercentage)
+                    .FirstOrDefault(),
+                AutonomousGenerationLastHeartbeatAtUtc = project.AutonomousGenerationRuns
+                    .OrderByDescending(run => run.StartedAtUtc)
+                    .Select(run => run.LastHeartbeatAtUtc)
+                    .FirstOrDefault()
             })
             .ToListAsync(cancellationToken);
     }

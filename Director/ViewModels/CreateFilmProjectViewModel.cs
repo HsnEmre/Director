@@ -1,17 +1,24 @@
 using System.Windows.Input;
 using Director.Commands;
+using Director.Dtos.Autonomous;
 using Director.Enums;
 using Director.Helpers;
 using Director.Models;
+using Director.Options;
+using Director.Services;
 using Director.Services.Interfaces;
+using Microsoft.Extensions.Options;
 
 namespace Director.ViewModels;
 
 public class CreateFilmProjectViewModel : ValidatableObservableObject
 {
     private readonly IFilmProjectService _filmProjectService;
+    private readonly IAutonomousGenerationRunService _autonomousRunService;
     private readonly IMessageService _messageService;
     private readonly INavigationService _navigationService;
+    private readonly IVideoModelCapabilityService _videoModelCapabilityService;
+    private readonly OllamaOptions _ollamaOptions;
     private bool _isInitializing;
     private bool _hasUnsavedChanges;
 
@@ -19,6 +26,8 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
     private string _projectName = string.Empty;
     private string _subject = string.Empty;
     private int _totalDurationMinutes = 20;
+    private bool _useSecondBasedTargetDuration;
+    private int _targetDurationSeconds = 10;
     private int _clipDurationSeconds = 10;
     private int _calculatedClipCount = 120;
     private string _calculatedOutputDurationText = string.Empty;
@@ -31,23 +40,40 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
     private string _aspectRatio = "16:9";
     private string _resolution = "1920x1080";
     private bool _useNarrator;
+    private bool _preferLtxNativeDialogue;
     private string? _narratorTone;
     private string? _mainCharacterDescription;
     private string? _additionalInstructions;
     private bool _isBusy;
     private string _statusMessage = "Yeni bir film projesi taslağı hazırlayın.";
     private string _aspectRatioWarningText = string.Empty;
+    private bool _isAutonomousMode;
+    private bool _hasAutonomousRun;
+    private bool _hasActiveAutonomousRun;
+    private int? _autonomousRunId;
+    private double _autonomousProgressPercentage;
+    private string _autonomousStatusText = "Otonom üretim henüz başlatılmadı.";
 
     public CreateFilmProjectViewModel(
         IFilmProjectService filmProjectService,
+        IAutonomousGenerationRunService autonomousRunService,
         IMessageService messageService,
-        INavigationService navigationService)
+        INavigationService navigationService,
+        IVideoModelCapabilityService videoModelCapabilityService,
+        IOptions<OllamaOptions> ollamaOptions)
     {
         _filmProjectService = filmProjectService;
+        _autonomousRunService = autonomousRunService;
         _messageService = messageService;
         _navigationService = navigationService;
+        _videoModelCapabilityService = videoModelCapabilityService;
+        _ollamaOptions = ollamaOptions.Value;
 
-        ClipDurationOptions = new List<int> { 5, 10, 15 };
+        ClipDurationOptions = _videoModelCapabilityService
+            .GetCapability(VideoModelCapabilityService.VerifiedLtxModelType)
+            .SupportedDurationsSeconds
+            .OrderBy(duration => duration)
+            .ToList();
         LanguageOptions = new List<string> { "Türkçe", "İngilizce", "Almanca", "Fransızca", "İspanyolca" };
         TargetAudienceOptions = new List<string> { "Çocuk", "Genç", "Yetişkin", "Aile", "Genel İzleyici" };
         StoryGenreOptions = new List<string> { "Macera", "Fantastik", "Bilim Kurgu", "Dram", "Komedi", "Korku", "Gerilim", "Belgesel", "Eğitici", "Masal" };
@@ -58,8 +84,12 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         NarratorToneOptions = new List<string> { "Sakin ve sıcak", "Masalsı", "Dramatik", "Belgesel anlatımı", "Enerjik", "Gizemli" };
 
         SaveDraftCommand = new AsyncRelayCommand(() => SaveAsync(FilmProjectStatus.Draft), () => !IsBusy);
-        ContinueCommand = new AsyncRelayCommand(() => SaveAsync(FilmProjectStatus.ReadyForStoryGeneration), () => !IsBusy);
+        ContinueCommand = new AsyncRelayCommand(ContinueAsync, () => !IsBusy && (!IsAutonomousMode || !HasActiveAutonomousRun));
         ClearFormCommand = new RelayCommand(ClearForm, () => !IsBusy);
+        PauseAutonomousCommand = new AsyncRelayCommand(PauseAutonomousAsync, () => !IsBusy && AutonomousRunId is int);
+        ResumeAutonomousCommand = new AsyncRelayCommand(ResumeAutonomousAsync, () => !IsBusy && AutonomousRunId is int);
+        CancelAutonomousCommand = new AsyncRelayCommand(CancelAutonomousAsync, () => !IsBusy && AutonomousRunId is int);
+        RetryAutonomousCommand = new AsyncRelayCommand(RetryAutonomousAsync, () => !IsBusy && AutonomousRunId is int);
 
         RecalculateClipCount();
         ValidateAll();
@@ -107,6 +137,38 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
             {
                 RecalculateClipCount();
                 ValidateTotalDurationMinutes();
+                MarkDirty();
+            }
+        }
+    }
+
+    public bool UseSecondBasedTargetDuration
+    {
+        get => _useSecondBasedTargetDuration;
+        set
+        {
+            if (SetProperty(ref _useSecondBasedTargetDuration, value))
+            {
+                RecalculateClipCount();
+                ValidateTotalDurationMinutes();
+                ValidateTargetDurationSeconds();
+                OnPropertyChanged(nameof(IsMinuteBasedTargetDuration));
+                MarkDirty();
+            }
+        }
+    }
+
+    public bool IsMinuteBasedTargetDuration => !UseSecondBasedTargetDuration;
+
+    public int TargetDurationSeconds
+    {
+        get => _targetDurationSeconds;
+        set
+        {
+            if (SetProperty(ref _targetDurationSeconds, value))
+            {
+                RecalculateClipCount();
+                ValidateTargetDurationSeconds();
                 MarkDirty();
             }
         }
@@ -249,6 +311,18 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         }
     }
 
+    public bool PreferLtxNativeDialogue
+    {
+        get => _preferLtxNativeDialogue;
+        set
+        {
+            if (SetProperty(ref _preferLtxNativeDialogue, value))
+            {
+                MarkDirty();
+            }
+        }
+    }
+
     public string? NarratorTone
     {
         get => _narratorTone;
@@ -310,9 +384,71 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         private set => SetProperty(ref _aspectRatioWarningText, value);
     }
 
+    public bool IsAutonomousMode
+    {
+        get => _isAutonomousMode;
+        set
+        {
+            if (SetProperty(ref _isAutonomousMode, value))
+            {
+                OnPropertyChanged(nameof(PrimaryActionText));
+                RaiseCommandStates();
+                MarkDirty();
+            }
+        }
+    }
+
+    public string PrimaryActionText => IsAutonomousMode
+        ? "Otonom Üretimi Başlat / Sürdür"
+        : "Hikayeyi Hazırlamaya Devam Et";
+
+    public bool HasAutonomousRun
+    {
+        get => _hasAutonomousRun;
+        private set => SetProperty(ref _hasAutonomousRun, value);
+    }
+
+    public int? AutonomousRunId
+    {
+        get => _autonomousRunId;
+        private set
+        {
+            if (SetProperty(ref _autonomousRunId, value))
+            {
+                HasAutonomousRun = value is not null;
+                RaiseCommandStates();
+            }
+        }
+    }
+
+    public bool HasActiveAutonomousRun
+    {
+        get => _hasActiveAutonomousRun;
+        private set
+        {
+            if (SetProperty(ref _hasActiveAutonomousRun, value))
+            {
+                RaiseCommandStates();
+            }
+        }
+    }
+
+    public double AutonomousProgressPercentage
+    {
+        get => _autonomousProgressPercentage;
+        private set => SetProperty(ref _autonomousProgressPercentage, value);
+    }
+
+    public string AutonomousStatusText
+    {
+        get => _autonomousStatusText;
+        private set => SetProperty(ref _autonomousStatusText, value);
+    }
+
     public string ProjectNameError => GetFirstError(nameof(ProjectName));
     public string SubjectError => GetFirstError(nameof(Subject));
     public string TotalDurationMinutesError => GetFirstError(nameof(TotalDurationMinutes));
+    public string TargetDurationSecondsError => GetFirstError(nameof(TargetDurationSeconds));
     public string ClipDurationSecondsError => GetFirstError(nameof(ClipDurationSeconds));
     public string LanguageError => GetFirstError(nameof(Language));
     public string StoryGenreError => GetFirstError(nameof(StoryGenre));
@@ -335,6 +471,10 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
     public ICommand SaveDraftCommand { get; }
     public ICommand ContinueCommand { get; }
     public ICommand ClearFormCommand { get; }
+    public ICommand PauseAutonomousCommand { get; }
+    public ICommand ResumeAutonomousCommand { get; }
+    public ICommand CancelAutonomousCommand { get; }
+    public ICommand RetryAutonomousCommand { get; }
 
     public async Task LoadProjectAsync(int projectId, CancellationToken cancellationToken = default)
     {
@@ -345,6 +485,10 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         CurrentProjectId = project.Id;
         ProjectName = project.ProjectName;
         Subject = project.Subject;
+        UseSecondBasedTargetDuration = false;
+        TargetDurationSeconds = Math.Max(
+            project.ClipDurationSeconds,
+            FilmDurationPlanner.CalculateOutputDurationSeconds(project.CalculatedClipCount, project.ClipDurationSeconds));
         TotalDurationMinutes = project.TotalDurationMinutes;
         ClipDurationSeconds = project.ClipDurationSeconds;
         Language = project.Language;
@@ -355,14 +499,22 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         AspectRatio = project.AspectRatio;
         Resolution = project.Resolution;
         UseNarrator = project.UseNarrator;
+        PreferLtxNativeDialogue = false;
+        IsAutonomousMode = project.AutonomousModeEnabled;
         NarratorTone = project.NarratorTone;
         MainCharacterDescription = project.MainCharacterDescription;
         AdditionalInstructions = project.AdditionalInstructions;
         StatusMessage = "Kayıtlı proje ayarları yüklendi.";
+        EnsureSupportedClipDurationForDefaultVideoModel();
         _isInitializing = false;
         _hasUnsavedChanges = false;
         ValidateAll();
+        await LoadAutonomousRunSummaryAsync(cancellationToken);
     }
+
+    private Task ContinueAsync() => IsAutonomousMode
+        ? SaveAndStartAutonomousAsync()
+        : SaveAsync(FilmProjectStatus.ReadyForStoryGeneration);
 
     private async Task SaveAsync(FilmProjectStatus status)
     {
@@ -421,6 +573,96 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         }
     }
 
+    private async Task SaveAndStartAutonomousAsync()
+    {
+        ValidateAll();
+        if (HasErrors)
+        {
+            StatusMessage = "Lütfen işaretlenen alanları düzeltin.";
+            return;
+        }
+
+        IsBusy = true;
+        StatusMessage = "Otonom üretim için proje ayarları kaydediliyor...";
+
+        try
+        {
+            if (CurrentProjectId is int projectId)
+            {
+                var existingProject = await _filmProjectService.GetByIdAsync(projectId);
+                if (existingProject is null)
+                {
+                    CurrentProjectId = null;
+                    var recreatedProject = BuildProject(FilmProjectStatus.ReadyForStoryGeneration);
+                    var createdProject = await _filmProjectService.CreateAsync(recreatedProject);
+                    CurrentProjectId = createdProject.Id;
+                }
+                else
+                {
+                    ApplyToProject(existingProject, FilmProjectStatus.ReadyForStoryGeneration);
+                    await _filmProjectService.UpdateAsync(existingProject);
+                }
+            }
+            else
+            {
+                var project = BuildProject(FilmProjectStatus.ReadyForStoryGeneration);
+                var createdProject = await _filmProjectService.CreateAsync(project);
+                CurrentProjectId = createdProject.Id;
+            }
+
+            if (CurrentProjectId is not int savedProjectId)
+            {
+                throw new InvalidOperationException("Otonom üretim için proje kaydı oluşturulamadı.");
+            }
+
+            var summary = await _autonomousRunService.StartOrGetActiveRunAsync(savedProjectId, BuildAutonomousSnapshot(savedProjectId));
+            ApplyAutonomousSummary(summary);
+            _hasUnsavedChanges = false;
+            StatusMessage = "Otonom üretim kuyruğa alındı. Arka plan worker güvenli checkpoint'lerden devam edecek.";
+            _messageService.ShowInfo("Otonom üretim başlatıldı/sürdürüldü.");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task PauseAutonomousAsync()
+    {
+        if (AutonomousRunId is int runId)
+        {
+            await _autonomousRunService.PauseAsync(runId);
+            await LoadAutonomousRunSummaryAsync();
+        }
+    }
+
+    private async Task ResumeAutonomousAsync()
+    {
+        if (AutonomousRunId is int runId)
+        {
+            await _autonomousRunService.ResumeAsync(runId);
+            await LoadAutonomousRunSummaryAsync();
+        }
+    }
+
+    private async Task CancelAutonomousAsync()
+    {
+        if (AutonomousRunId is int runId)
+        {
+            await _autonomousRunService.RequestCancellationAsync(runId);
+            await LoadAutonomousRunSummaryAsync();
+        }
+    }
+
+    private async Task RetryAutonomousAsync()
+    {
+        if (AutonomousRunId is int runId)
+        {
+            await _autonomousRunService.RetryAsync(runId);
+            await LoadAutonomousRunSummaryAsync();
+        }
+    }
+
     private FilmProject BuildProject(FilmProjectStatus status)
     {
         var project = new FilmProject();
@@ -432,7 +674,9 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
     {
         project.ProjectName = ProjectName.Trim();
         project.Subject = Subject.Trim();
-        project.TotalDurationMinutes = TotalDurationMinutes;
+        project.TotalDurationMinutes = UseSecondBasedTargetDuration
+            ? Math.Max(1, (int)Math.Ceiling(GetTargetDurationSeconds() / 60.0))
+            : TotalDurationMinutes;
         project.ClipDurationSeconds = ClipDurationSeconds;
         project.CalculatedClipCount = CalculatedClipCount;
         project.Language = Language.Trim();
@@ -443,6 +687,7 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         project.AspectRatio = AspectRatio.Trim();
         project.Resolution = Resolution.Trim();
         project.UseNarrator = UseNarrator;
+        project.AutonomousModeEnabled = IsAutonomousMode;
         project.NarratorTone = UseNarrator ? NarratorTone?.Trim() : null;
         project.MainCharacterDescription = MainCharacterDescription?.Trim();
         project.AdditionalInstructions = AdditionalInstructions?.Trim();
@@ -461,7 +706,9 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         CurrentProjectId = null;
         ProjectName = string.Empty;
         Subject = string.Empty;
+        UseSecondBasedTargetDuration = false;
         TotalDurationMinutes = 20;
+        TargetDurationSeconds = 10;
         ClipDurationSeconds = 10;
         Language = "Türkçe";
         TargetAudience = "Genel İzleyici";
@@ -471,6 +718,7 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         AspectRatio = "16:9";
         Resolution = "1920x1080";
         UseNarrator = false;
+        PreferLtxNativeDialogue = false;
         NarratorTone = null;
         MainCharacterDescription = null;
         AdditionalInstructions = null;
@@ -483,7 +731,8 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
 
     private void RecalculateClipCount()
     {
-        if (TotalDurationMinutes <= 0 || ClipDurationSeconds <= 0)
+        var totalSeconds = GetTargetDurationSeconds();
+        if (totalSeconds <= 0 || ClipDurationSeconds <= 0)
         {
             CalculatedClipCount = 0;
             CalculatedOutputDurationText = "Hesaplanamadı";
@@ -491,9 +740,8 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
             return;
         }
 
-        var totalSeconds = TotalDurationMinutes * 60;
-        CalculatedClipCount = (int)Math.Ceiling(totalSeconds / (double)ClipDurationSeconds);
-        var outputSeconds = CalculatedClipCount * ClipDurationSeconds;
+        CalculatedClipCount = FilmDurationPlanner.CalculateClipCountForTargetSeconds(totalSeconds, ClipDurationSeconds);
+        var outputSeconds = FilmDurationPlanner.CalculateOutputDurationSeconds(CalculatedClipCount, ClipDurationSeconds);
         CalculatedOutputDurationText = $"{CalculatedClipCount} klip × {ClipDurationSeconds} sn = {outputSeconds} sn";
         DurationWarningText = outputSeconds > totalSeconds
             ? $"Son klip nedeniyle hedef süreden {outputSeconds - totalSeconds} saniye fazla üretim planlanıyor."
@@ -505,6 +753,7 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         ValidateProjectName();
         ValidateSubject();
         ValidateTotalDurationMinutes();
+        ValidateTargetDurationSeconds();
         ValidateClipDurationSeconds();
         ValidateRequired(nameof(Language), Language, "Dil zorunludur.");
         ValidateRequired(nameof(StoryGenre), StoryGenre, "Hikâye türü zorunludur.");
@@ -529,7 +778,7 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
     private void ValidateTotalDurationMinutes()
     {
         var errors = new List<string>();
-        if (TotalDurationMinutes < 1 || TotalDurationMinutes > 180)
+        if (!UseSecondBasedTargetDuration && (TotalDurationMinutes < 1 || TotalDurationMinutes > 180))
         {
             errors.Add("Toplam süre 1 ile 180 dakika arasında olmalıdır.");
         }
@@ -538,14 +787,39 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         OnPropertyChanged(nameof(TotalDurationMinutesError));
     }
 
+    private void ValidateTargetDurationSeconds()
+    {
+        var errors = new List<string>();
+        if (UseSecondBasedTargetDuration && (TargetDurationSeconds < 1 || TargetDurationSeconds > 10800))
+        {
+            errors.Add("Hedef sure 1 ile 10800 saniye arasinda olmalidir.");
+        }
+
+        SetErrors(nameof(TargetDurationSeconds), errors);
+        OnPropertyChanged(nameof(TargetDurationSecondsError));
+    }
+
     private void ValidateClipDurationSeconds()
     {
-        var errors = ClipDurationOptions.Contains(ClipDurationSeconds)
+        var validation = _videoModelCapabilityService.ValidateDuration(VideoModelCapabilityService.VerifiedLtxModelType, ClipDurationSeconds);
+        var errors = validation.IsValid
             ? Enumerable.Empty<string>()
-            : new[] { "Klip süresi yalnızca 5, 10 veya 15 saniye olabilir." };
+            : new[] { validation.ErrorMessage };
 
         SetErrors(nameof(ClipDurationSeconds), errors);
         OnPropertyChanged(nameof(ClipDurationSecondsError));
+    }
+
+    private void EnsureSupportedClipDurationForDefaultVideoModel()
+    {
+        var validation = _videoModelCapabilityService.ValidateDuration(VideoModelCapabilityService.VerifiedLtxModelType, ClipDurationSeconds);
+        if (validation.IsValid)
+        {
+            return;
+        }
+
+        ClipDurationSeconds = validation.Capability.DefaultDurationSeconds;
+        StatusMessage = validation.ErrorMessage + " Varsayılan süreye dönüldü.";
     }
 
     private void ValidateNarratorTone()
@@ -605,5 +879,90 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         {
             clearFormCommand.RaiseCanExecuteChanged();
         }
+
+        if (PauseAutonomousCommand is AsyncRelayCommand pauseCommand)
+        {
+            pauseCommand.RaiseCanExecuteChanged();
+        }
+
+        if (ResumeAutonomousCommand is AsyncRelayCommand resumeCommand)
+        {
+            resumeCommand.RaiseCanExecuteChanged();
+        }
+
+        if (CancelAutonomousCommand is AsyncRelayCommand cancelCommand)
+        {
+            cancelCommand.RaiseCanExecuteChanged();
+        }
+
+        if (RetryAutonomousCommand is AsyncRelayCommand retryCommand)
+        {
+            retryCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    private AutonomousGenerationConfigurationSnapshot BuildAutonomousSnapshot(int filmProjectId) => new()
+    {
+        FilmProjectId = filmProjectId,
+        ProjectName = ProjectName.Trim(),
+        Subject = Subject.Trim(),
+        TargetDurationSeconds = GetTargetDurationSeconds(),
+        TotalDurationMinutes = UseSecondBasedTargetDuration
+            ? Math.Max(1, (int)Math.Ceiling(GetTargetDurationSeconds() / 60.0))
+            : TotalDurationMinutes,
+        ClipDurationSeconds = ClipDurationSeconds,
+        CalculatedClipCount = CalculatedClipCount,
+        Language = Language.Trim(),
+        TargetAudience = TargetAudience.Trim(),
+        StoryGenre = StoryGenre.Trim(),
+        VisualStyle = VisualStyle.Trim(),
+        VideoStyle = VideoStyle.Trim(),
+        AspectRatio = AspectRatio.Trim(),
+        Resolution = Resolution.Trim(),
+        UseNarrator = UseNarrator,
+        NarratorTone = UseNarrator ? NarratorTone?.Trim() : null,
+        MainCharacterDescription = MainCharacterDescription?.Trim(),
+        AdditionalInstructions = AdditionalInstructions?.Trim(),
+        StoryModel = _ollamaOptions.StoryTextModel,
+        ImageModelType = "qwen_image_20B",
+        VideoModelType = "ltx2_22B_distilled_gguf_q4_k_m",
+        ImageInferenceSteps = 20,
+        VideoInferenceSteps = 12,
+        RandomSeed = true,
+        GenerateAudio = UseNarrator,
+        PreferLtxNativeDialogue = PreferLtxNativeDialogue
+    };
+
+    private int GetTargetDurationSeconds() =>
+        UseSecondBasedTargetDuration ? TargetDurationSeconds : TotalDurationMinutes * 60;
+
+    private async Task LoadAutonomousRunSummaryAsync(CancellationToken cancellationToken = default)
+    {
+        if (CurrentProjectId is not int projectId)
+        {
+            return;
+        }
+
+        try
+        {
+            var summary = await _autonomousRunService.GetLatestRunForProjectAsync(projectId, cancellationToken);
+            if (summary is not null)
+            {
+                ApplyAutonomousSummary(summary);
+            }
+        }
+        catch
+        {
+            AutonomousStatusText = "Otonom durum okunamadı. Migration henüz uygulanmadıysa bu beklenen bir durumdur.";
+        }
+    }
+
+    private void ApplyAutonomousSummary(AutonomousGenerationRunSummary summary)
+    {
+        AutonomousRunId = summary.Id;
+        HasActiveAutonomousRun = summary.IsActive && summary.Status != AutonomousGenerationRunStatus.Paused;
+        AutonomousProgressPercentage = summary.OverallProgressPercentage;
+        var sceneText = summary.CurrentSceneNumber is int sceneNumber ? $" Sahne: {sceneNumber}." : string.Empty;
+        AutonomousStatusText = $"{summary.Status} / {summary.CurrentStage}. İlerleme: {summary.OverallProgressPercentage:0.#}%.{sceneText} {summary.LastMessage}".Trim();
     }
 }

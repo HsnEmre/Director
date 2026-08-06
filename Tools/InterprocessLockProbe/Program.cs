@@ -4,7 +4,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 if (args.Length < 3)
 {
-    Console.Error.WriteLine("Usage: InterprocessLockProbe gpu <lock-directory> <lock-namespace> | project <lock-directory> <database-hash> <project-id>");
+    Console.Error.WriteLine("Usage: InterprocessLockProbe gpu <lock-directory> <lock-namespace> | project <lock-directory> <database-hash> <project-id> | recovery <lock-directory> <database-hash> <job-id>");
     return 2;
 }
 
@@ -26,6 +26,17 @@ else if (string.Equals(args[0], "project", StringComparison.OrdinalIgnoreCase) &
         NullLogger<ProjectGenerationLeaseCoordinator>.Instance,
         args[1]);
     lease = await coordinator.AcquireAsync(projectId);
+}
+else if (string.Equals(args[0], "recovery", StringComparison.OrdinalIgnoreCase) &&
+         args.Length >= 4 &&
+         int.TryParse(args[3], out var jobId))
+{
+    var coordinator = new MediaOutputRecoveryLeaseCoordinator(
+        null,
+        NullLogger<MediaOutputRecoveryLeaseCoordinator>.Instance,
+        args[1],
+        new DatabaseIdentity("test", args[2]));
+    lease = await coordinator.AcquireAsync(jobId);
 }
 else
 {

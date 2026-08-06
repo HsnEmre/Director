@@ -5,6 +5,9 @@ public sealed class OllamaResponseMetadata
     public string Model { get; set; } = string.Empty;
     public string Endpoint { get; set; } = "/api/chat";
     public string OperationName { get; set; } = string.Empty;
+    public string? OutputProfile { get; set; }
+    public int? PromptCharacterCount { get; set; }
+    public int? EstimatedPromptTokens { get; set; }
     public int? FilmProjectId { get; set; }
     public int? SceneNumber { get; set; }
     public int ConfiguredResponseLimit { get; set; }
@@ -15,6 +18,9 @@ public sealed class OllamaResponseMetadata
     public int ResponseTokenCount { get; set; }
     public int ContentChunkCount { get; set; }
     public int ResponseCharacterCount { get; set; }
+    public int RepeatedBlockLength { get; set; }
+    public int RepeatedBlockCount { get; set; }
+    public string RepeatedBlockPreview { get; set; } = string.Empty;
     public TimeSpan Elapsed { get; set; }
     public TimeSpan LoadDuration { get; set; }
     public TimeSpan EvaluationDuration { get; set; }
@@ -32,9 +38,15 @@ public sealed class OllamaGenerationSettings
 {
     public double? Temperature { get; set; }
     public double? TopP { get; set; }
+    public int? TopK { get; set; }
+    public double? RepeatPenalty { get; set; }
+    public int? RepeatLastN { get; set; }
     public int? NumPredict { get; set; }
     public bool Think { get; set; }
     public string? OperationName { get; set; }
+    public string? OutputProfile { get; set; }
+    public int? PromptCharacterCount { get; set; }
+    public int? EstimatedPromptTokens { get; set; }
     public int? FilmProjectId { get; set; }
     public int? SceneNumber { get; set; }
 }

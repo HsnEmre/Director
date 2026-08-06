@@ -21,6 +21,8 @@ public class AppDbContext : DbContext
     public DbSet<SceneSpeechPlan> SceneSpeechPlans => Set<SceneSpeechPlan>();
     public DbSet<SceneSpeechSegment> SceneSpeechSegments => Set<SceneSpeechSegment>();
     public DbSet<LtxNativeVoiceProfile> LtxNativeVoiceProfiles => Set<LtxNativeVoiceProfile>();
+    public DbSet<AutonomousGenerationRun> AutonomousGenerationRuns => Set<AutonomousGenerationRun>();
+    public DbSet<AutonomousSceneWorkItem> AutonomousSceneWorkItems => Set<AutonomousSceneWorkItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -352,6 +354,79 @@ public class AppDbContext : DbContext
             entity.Property(profile => profile.TempoDescription).IsRequired().HasMaxLength(120);
             entity.Property(profile => profile.SettingsHash).IsRequired().HasMaxLength(96);
             entity.Property(profile => profile.CreatedAt).HasDefaultValueSql("GETDATE()").IsRequired();
+        });
+
+        modelBuilder.Entity<AutonomousGenerationRun>(entity =>
+        {
+            entity.HasKey(run => run.Id);
+            entity.HasIndex(run => run.CorrelationId);
+            entity.HasIndex(run => run.FilmProjectId)
+                .IsUnique()
+                .HasDatabaseName("IX_AutonomousGenerationRuns_FilmProjectId_Active")
+                .HasFilter("[Status] IN (0, 1, 2, 3, 4, 5, 6, 7, 10, 12)");
+
+            entity.HasOne(run => run.FilmProject)
+                .WithMany(project => project.AutonomousGenerationRuns)
+                .HasForeignKey(run => run.FilmProjectId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(run => run.CurrentScene)
+                .WithMany()
+                .HasForeignKey(run => run.CurrentSceneId)
+                .OnDelete(DeleteBehavior.NoAction);
+
+            entity.Property(run => run.Status).HasConversion<int>().IsRequired();
+            entity.Property(run => run.CurrentStage).HasConversion<int>().IsRequired();
+            entity.Property(run => run.ConfigurationSnapshotJson).IsRequired().HasColumnType("nvarchar(max)");
+            entity.Property(run => run.CorrelationId).IsRequired().HasMaxLength(64);
+            entity.Property(run => run.WorkerId).HasMaxLength(64);
+            entity.Property(run => run.LastError).HasColumnType("nvarchar(max)");
+            entity.Property(run => run.LastMessage).IsRequired().HasColumnType("nvarchar(max)");
+            entity.Property(run => run.StartedAtUtc).IsRequired();
+            entity.Property(run => run.UpdatedAtUtc).IsRequired();
+            entity.Property(run => run.LastHeartbeatAtUtc).IsRequired();
+        });
+
+        modelBuilder.Entity<AutonomousSceneWorkItem>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.AutonomousGenerationRunId, item.SceneNumber }).IsUnique();
+            entity.HasIndex(item => new { item.StorySceneId, item.AutonomousGenerationRunId }).IsUnique();
+            entity.HasIndex(item => new { item.StorySceneId, item.ImageStatus });
+            entity.HasIndex(item => new { item.StorySceneId, item.VideoStatus });
+            entity.HasIndex(item => new { item.StorySceneId, item.AudioStatus });
+
+            entity.HasOne(item => item.AutonomousGenerationRun)
+                .WithMany(run => run.WorkItems)
+                .HasForeignKey(item => item.AutonomousGenerationRunId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(item => item.StoryScene)
+                .WithMany()
+                .HasForeignKey(item => item.StorySceneId)
+                .OnDelete(DeleteBehavior.NoAction);
+
+            entity.HasOne(item => item.ImageMediaAsset)
+                .WithMany()
+                .HasForeignKey(item => item.ImageMediaAssetId)
+                .OnDelete(DeleteBehavior.NoAction);
+
+            entity.HasOne(item => item.VideoMediaAsset)
+                .WithMany()
+                .HasForeignKey(item => item.VideoMediaAssetId)
+                .OnDelete(DeleteBehavior.NoAction);
+
+            entity.HasOne(item => item.AudioMediaAsset)
+                .WithMany()
+                .HasForeignKey(item => item.AudioMediaAssetId)
+                .OnDelete(DeleteBehavior.NoAction);
+
+            entity.Property(item => item.ImageStatus).HasConversion<int>().IsRequired();
+            entity.Property(item => item.VideoStatus).HasConversion<int>().IsRequired();
+            entity.Property(item => item.AudioStatus).HasConversion<int>().IsRequired();
+            entity.Property(item => item.FinalizationStatus).HasConversion<int>().IsRequired();
+            entity.Property(item => item.LastError).HasColumnType("nvarchar(max)");
+            entity.Property(item => item.UpdatedAtUtc).IsRequired();
         });
     }
 }

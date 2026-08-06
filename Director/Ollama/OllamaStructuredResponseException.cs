@@ -67,6 +67,14 @@ public sealed class OllamaResponseTruncatedException : OllamaResponseException
     }
 }
 
+public sealed class OllamaRepetitionDetectedException : OllamaResponseException
+{
+    public OllamaRepetitionDetectedException(string message, string responseContent, OllamaResponseMetadata metadata)
+        : base(message, "RepetitionDetected", responseContent, metadata)
+    {
+    }
+}
+
 public sealed class OllamaResponseTooLargeException : OllamaResponseException
 {
     public OllamaResponseTooLargeException(string message, string responseContent, OllamaResponseMetadata metadata)

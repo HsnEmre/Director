@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Director.Enums;
 using Director.Services;
+using Director.Services.Interfaces;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Director.Tests;
@@ -215,6 +216,77 @@ public sealed class InterprocessLeaseTests
     }
 
     [Fact]
+    public async Task RecoveryLease_SameDatabaseAndJobReturnsControlledBusy()
+    {
+        using var scope = new LockTestScope();
+        var firstCoordinator = scope.CreateRecoveryCoordinator("same-db");
+        var secondCoordinator = scope.CreateRecoveryCoordinator("same-db");
+        await using var first = await firstCoordinator.AcquireAsync(52);
+
+        await Assert.ThrowsAsync<MediaOutputRecoveryBusyException>(async () =>
+            await secondCoordinator.AcquireAsync(52));
+    }
+
+    [Fact]
+    public async Task RecoveryLease_DifferentJobsDoNotBlock()
+    {
+        using var scope = new LockTestScope();
+        var coordinator = scope.CreateRecoveryCoordinator("same-db");
+        await using var first = await coordinator.AcquireAsync(52);
+        await using var second = await coordinator.AcquireAsync(53);
+    }
+
+    [Fact]
+    public async Task RecoveryLease_StaleLockFileDoesNotBlock()
+    {
+        using var scope = new LockTestScope();
+        Directory.CreateDirectory(scope.DirectoryPath);
+        var hash = new string('a', 64);
+        await File.WriteAllTextAsync(
+            Path.Combine(scope.DirectoryPath, $"{MediaOutputRecoveryLeaseCoordinator.LockNamespace}.{hash}.52.lock"),
+            "stale");
+
+        await using var lease = await scope.CreateRecoveryCoordinator(hash).AcquireAsync(52);
+    }
+
+    [Fact]
+    public async Task RecoveryLease_ChildCrashReleasesOsLock()
+    {
+        using var scope = new LockTestScope();
+        using var child = await scope.StartProbeAsync("recovery", "db-crash", "52");
+        await Assert.ThrowsAsync<MediaOutputRecoveryBusyException>(async () =>
+            await scope.CreateRecoveryCoordinator("db-crash").AcquireAsync(52));
+
+        child.Kill(entireProcessTree: true);
+        await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await using var next = await scope.CreateRecoveryCoordinator("db-crash").AcquireAsync(52);
+    }
+
+    [Fact]
+    public async Task RecoveryLease_ExceptionScopeReleasesLease()
+    {
+        using var scope = new LockTestScope();
+        var coordinator = scope.CreateRecoveryCoordinator("same-db");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => ThrowInsideRecoveryLeaseAsync(coordinator));
+        await using var next = await coordinator.AcquireAsync(52);
+    }
+
+    [Fact]
+    public async Task RecoveryLease_MetadataContainsNoSecrets()
+    {
+        using var scope = new LockTestScope();
+        var hash = "password-secret-db";
+        await using var lease = await scope.CreateRecoveryCoordinator(hash).AcquireAsync(52);
+        var path = Path.Combine(scope.DirectoryPath, $"{MediaOutputRecoveryLeaseCoordinator.LockNamespace}.{hash}.52.lock");
+
+        Assert.True(InterprocessFileLease.TryReadMetadata(path, out var metadata));
+        var serialized = System.Text.Json.JsonSerializer.Serialize(metadata);
+        Assert.DoesNotContain("secret", serialized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("password", serialized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("connection", serialized, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void DatabaseIdentity_IgnoresCredentialsAndSeparatesDatabases()
     {
         var first = DatabaseIdentity.Create(
@@ -245,6 +317,12 @@ public sealed class InterprocessLeaseTests
         throw new InvalidOperationException("expected");
     }
 
+    private static async Task ThrowInsideRecoveryLeaseAsync(MediaOutputRecoveryLeaseCoordinator coordinator)
+    {
+        await using var lease = await coordinator.AcquireAsync(52);
+        throw new InvalidOperationException("expected");
+    }
+
     private sealed class LockTestScope : IDisposable
     {
         public LockTestScope()
@@ -264,6 +342,13 @@ public sealed class InterprocessLeaseTests
                 new DatabaseIdentity("test", databaseHash),
                 NullLogger<ProjectGenerationLeaseCoordinator>.Instance,
                 DirectoryPath);
+
+        public MediaOutputRecoveryLeaseCoordinator CreateRecoveryCoordinator(string databaseHash) =>
+            new(
+                null,
+                NullLogger<MediaOutputRecoveryLeaseCoordinator>.Instance,
+                DirectoryPath,
+                new DatabaseIdentity("test", databaseHash));
 
         public async Task<Process> StartProbeAsync(params string[] probeArguments)
         {

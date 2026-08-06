@@ -22,6 +22,178 @@ namespace Director.Migrations
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
 
+            modelBuilder.Entity("Director.Models.AutonomousGenerationRun", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("CancellationRequested")
+                        .HasColumnType("bit");
+
+                    b.Property<DateTime?>("CompletedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("CompletedSceneCount")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ConfigurationSnapshotJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("CorrelationId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<int?>("CurrentSceneId")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("CurrentSceneNumber")
+                        .HasColumnType("int");
+
+                    b.Property<int>("CurrentStage")
+                        .HasColumnType("int");
+
+                    b.Property<int>("FilmProjectId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("LastHeartbeatAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("LastMessage")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("LeaseExpiresAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<double>("OverallProgressPercentage")
+                        .HasColumnType("float");
+
+                    b.Property<double>("StageProgressPercentage")
+                        .HasColumnType("float");
+
+                    b.Property<DateTime>("StartedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("int");
+
+                    b.Property<int>("TotalSceneCount")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("WorkerId")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CorrelationId");
+
+                    b.HasIndex("CurrentSceneId");
+
+                    b.HasIndex("FilmProjectId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_AutonomousGenerationRuns_FilmProjectId_Active")
+                        .HasFilter("[Status] IN (0, 1, 2, 3, 4, 5, 6, 7, 10, 12)");
+
+                    b.ToTable("AutonomousGenerationRuns");
+                });
+
+            modelBuilder.Entity("Director.Models.AutonomousSceneWorkItem", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("AudioAttemptCount")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("AudioMediaAssetId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("AudioStatus")
+                        .HasColumnType("int");
+
+                    b.Property<int>("AutonomousGenerationRunId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("CompletedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("FinalizationStatus")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ImageAttemptCount")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("ImageMediaAssetId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ImageStatus")
+                        .HasColumnType("int");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("SceneNumber")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("StartedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("StorySceneId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("VideoAttemptCount")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("VideoMediaAssetId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("VideoStatus")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AudioMediaAssetId");
+
+                    b.HasIndex("ImageMediaAssetId");
+
+                    b.HasIndex("VideoMediaAssetId");
+
+                    b.HasIndex("AutonomousGenerationRunId", "SceneNumber")
+                        .IsUnique();
+
+                    b.HasIndex("StorySceneId", "AudioStatus");
+
+                    b.HasIndex("StorySceneId", "AutonomousGenerationRunId")
+                        .IsUnique();
+
+                    b.HasIndex("StorySceneId", "ImageStatus");
+
+                    b.HasIndex("StorySceneId", "VideoStatus");
+
+                    b.ToTable("AutonomousSceneWorkItems");
+                });
+
             modelBuilder.Entity("Director.Models.CharacterVoiceProfile", b =>
                 {
                     b.Property<int>("Id")
@@ -142,6 +314,9 @@ namespace Director.Migrations
                         .IsRequired()
                         .HasMaxLength(30)
                         .HasColumnType("nvarchar(30)");
+
+                    b.Property<bool>("AutonomousModeEnabled")
+                        .HasColumnType("bit");
 
                     b.Property<int>("CalculatedClipCount")
                         .HasColumnType("int");
@@ -836,6 +1011,64 @@ namespace Director.Migrations
                     b.ToTable("StoryCharacters");
                 });
 
+            modelBuilder.Entity("Director.Models.AutonomousGenerationRun", b =>
+                {
+                    b.HasOne("Director.Models.FilmScene", "CurrentScene")
+                        .WithMany()
+                        .HasForeignKey("CurrentSceneId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
+                    b.HasOne("Director.Models.FilmProject", "FilmProject")
+                        .WithMany("AutonomousGenerationRuns")
+                        .HasForeignKey("FilmProjectId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("CurrentScene");
+
+                    b.Navigation("FilmProject");
+                });
+
+            modelBuilder.Entity("Director.Models.AutonomousSceneWorkItem", b =>
+                {
+                    b.HasOne("Director.Models.SceneMediaAsset", "AudioMediaAsset")
+                        .WithMany()
+                        .HasForeignKey("AudioMediaAssetId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
+                    b.HasOne("Director.Models.AutonomousGenerationRun", "AutonomousGenerationRun")
+                        .WithMany("WorkItems")
+                        .HasForeignKey("AutonomousGenerationRunId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Director.Models.SceneMediaAsset", "ImageMediaAsset")
+                        .WithMany()
+                        .HasForeignKey("ImageMediaAssetId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
+                    b.HasOne("Director.Models.FilmScene", "StoryScene")
+                        .WithMany()
+                        .HasForeignKey("StorySceneId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.HasOne("Director.Models.SceneMediaAsset", "VideoMediaAsset")
+                        .WithMany()
+                        .HasForeignKey("VideoMediaAssetId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
+                    b.Navigation("AudioMediaAsset");
+
+                    b.Navigation("AutonomousGenerationRun");
+
+                    b.Navigation("ImageMediaAsset");
+
+                    b.Navigation("StoryScene");
+
+                    b.Navigation("VideoMediaAsset");
+                });
+
             modelBuilder.Entity("Director.Models.CharacterVoiceProfile", b =>
                 {
                     b.HasOne("Director.Models.FilmProject", "FilmProject")
@@ -1019,8 +1252,15 @@ namespace Director.Migrations
                     b.Navigation("FilmStory");
                 });
 
+            modelBuilder.Entity("Director.Models.AutonomousGenerationRun", b =>
+                {
+                    b.Navigation("WorkItems");
+                });
+
             modelBuilder.Entity("Director.Models.FilmProject", b =>
                 {
+                    b.Navigation("AutonomousGenerationRuns");
+
                     b.Navigation("GenerationJobs");
 
                     b.Navigation("MediaAssets");

@@ -79,6 +79,58 @@ public sealed class OllamaStreamingTests
     }
 
     [Fact]
+    public async Task ImageNegativePromptRepetition_IsDetectedBeforeTokenLimit()
+    {
+        var block = ", 3D animasyonlu tasarimli, 3D animasyonlu boyutlu, 3D animasyonlu cizimli ";
+        var raw = "{\"imageNegativePrompt\":\"" + string.Concat(Enumerable.Repeat(block, 4));
+        var ndjson = "{\"message\":{\"content\":" + JsonString(raw) + "},\"done\":false}\n" +
+                     "{\"message\":{\"content\":\"tail\"},\"done\":true,\"done_reason\":\"length\",\"eval_count\":6144}\n";
+        var client = CreateClient(ndjson, RepetitionOptions());
+
+        var exception = await Assert.ThrowsAsync<OllamaRepetitionDetectedException>(() =>
+            client.ChatStructuredAsync<TestResponse>(
+                [new OllamaChatMessage("user", "test")],
+                new { type = "object" },
+                cancellationToken: CancellationToken.None));
+
+        Assert.Equal("RepetitionDetected", exception.Stage);
+        Assert.True(exception.Metadata.RepeatedBlockLength >= 48);
+        Assert.True(exception.Metadata.RepeatedBlockCount >= 4);
+        Assert.NotEqual(6144, exception.Metadata.ResponseTokenCount);
+    }
+
+    [Fact]
+    public async Task VideoNegativePromptRepetition_IsDetected()
+    {
+        var block = ", face morphing background warping sudden camera jump duplicated limbs ";
+        var raw = "{\"videoNegativePrompt\":\"" + string.Concat(Enumerable.Repeat(block, 4));
+        var ndjson = "{\"message\":{\"content\":" + JsonString(raw) + "},\"done\":false}\n";
+        var client = CreateClient(ndjson, RepetitionOptions());
+
+        var exception = await Assert.ThrowsAsync<OllamaRepetitionDetectedException>(() =>
+            client.ChatStructuredAsync<TestResponse>(
+                [new OllamaChatMessage("user", "test")],
+                new { type = "object" },
+                cancellationToken: CancellationToken.None));
+
+        Assert.Contains("face morphing", exception.Metadata.RepeatedBlockPreview);
+    }
+
+    [Fact]
+    public async Task NormalShortRepeat_DoesNotTriggerRepetitionGuard()
+    {
+        const string ndjson = "{\"message\":{\"content\":\"{\\\"value\\\":\\\"go go go, look look\\\"}\"},\"done\":false}\n{\"message\":{\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        var client = CreateClient(ndjson, RepetitionOptions());
+
+        var result = await client.ChatStructuredAsync<TestResponse>(
+            [new OllamaChatMessage("user", "test")],
+            new { type = "object" },
+            cancellationToken: CancellationToken.None);
+
+        Assert.Equal("go go go, look look", result.Value);
+    }
+
+    [Fact]
     public async Task ThinkingChannel_IsNotAppendedToFinalJson()
     {
         const string ndjson = "{\"message\":{\"thinking\":\"not json { reasoning }\",\"content\":\"{\\\"value\\\":\\\"ok\\\"}\"},\"done\":false}\n{\"message\":{\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n";
@@ -162,6 +214,17 @@ public sealed class OllamaStreamingTests
             new HttpClient(new RecordingHandler(responseBody)),
             Microsoft.Extensions.Options.Options.Create(options),
             NullLogger<OllamaClient>.Instance);
+
+    private static OllamaOptions RepetitionOptions() => new()
+    {
+        RepetitionGuardMinCharacters = 128,
+        RepetitionGuardMinBlockCharacters = 48,
+        RepetitionGuardMaxBlockCharacters = 160,
+        RepetitionGuardMinConsecutiveRepeats = 4
+    };
+
+    private static string JsonString(string value) =>
+        System.Text.Json.JsonSerializer.Serialize(value);
 
     private sealed class ProgressCollector<T> : IProgress<T>
     {

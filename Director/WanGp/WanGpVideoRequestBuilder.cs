@@ -15,17 +15,20 @@ public sealed class WanGpVideoRequestBuilder : IWanGpVideoRequestBuilder
     private readonly IWanGpVideoInputContractResolver _inputContractResolver;
     private readonly IWanGpVideoTimingContractResolver _timingContractResolver;
     private readonly ILtxNativeDialogueFinalPromptBuilder _finalPromptBuilder;
+    private readonly IVideoModelCapabilityService _videoModelCapabilityService;
 
     public WanGpVideoRequestBuilder(
         IWanGpClient wanGpClient,
         IWanGpVideoInputContractResolver inputContractResolver,
         IWanGpVideoTimingContractResolver timingContractResolver,
-        ILtxNativeDialogueFinalPromptBuilder finalPromptBuilder)
+        ILtxNativeDialogueFinalPromptBuilder finalPromptBuilder,
+        IVideoModelCapabilityService? videoModelCapabilityService = null)
     {
         _wanGpClient = wanGpClient;
         _inputContractResolver = inputContractResolver;
         _timingContractResolver = timingContractResolver;
         _finalPromptBuilder = finalPromptBuilder;
+        _videoModelCapabilityService = videoModelCapabilityService ?? new VideoModelCapabilityService();
     }
 
     public async Task<WanGpVideoRequestBuildResult> BuildAsync(WanGpVideoGenerationRequest request, CancellationToken cancellationToken = default)
@@ -43,6 +46,11 @@ public sealed class WanGpVideoRequestBuilder : IWanGpVideoRequestBuilder
 
         var schema = await _wanGpClient.GetModelSchemaAsync(request.ModelType, cancellationToken)
             ?? throw new InvalidOperationException("WanGP video model schema alinamadi.");
+        var durationValidation = _videoModelCapabilityService.ValidateDuration(request.ModelType, request.DurationSeconds);
+        if (!durationValidation.IsValid)
+        {
+            throw new InvalidOperationException(durationValidation.ErrorMessage);
+        }
 
         WriteSchemaDiagnostics(request.ModelType, schema);
 
@@ -293,8 +301,8 @@ public sealed class WanGpVideoRequestBuilder : IWanGpVideoRequestBuilder
         }
 
         var root = GetDiagnosticsRoot();
-        File.WriteAllText(Path.Combine(root, "ltx-video-schema.json"), Sanitize(schema.RawSchema).ToJsonString(JsonOptions));
-        File.WriteAllText(Path.Combine(root, "ltx-video-defaults.json"), Sanitize(schema.DefaultSettings).ToJsonString(JsonOptions));
+        TryWriteDiagnostic(Path.Combine(root, "ltx-video-schema.json"), Sanitize(schema.RawSchema).ToJsonString(JsonOptions));
+        TryWriteDiagnostic(Path.Combine(root, "ltx-video-defaults.json"), Sanitize(schema.DefaultSettings).ToJsonString(JsonOptions));
     }
 
     private static JsonObject Sanitize(JsonObject source)
@@ -378,7 +386,21 @@ public sealed class WanGpVideoRequestBuilder : IWanGpVideoRequestBuilder
             ["seed"] = request.RandomSeed ? null : request.Seed
         };
 
-        File.WriteAllText(Path.Combine(GetDiagnosticsRoot(), "video-request-summary.json"), summary.ToJsonString(JsonOptions));
+        TryWriteDiagnostic(Path.Combine(GetDiagnosticsRoot(), "video-request-summary.json"), summary.ToJsonString(JsonOptions));
+    }
+
+    private static void TryWriteDiagnostic(string path, string content)
+    {
+        try
+        {
+            File.WriteAllText(path, content);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
     }
 
     private static Dictionary<string, object?> ToObjectDictionary(JsonObject source)

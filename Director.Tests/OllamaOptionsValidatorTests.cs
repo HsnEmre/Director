@@ -34,7 +34,14 @@ public sealed class OllamaOptionsValidatorTests
         yield return [new Action<OllamaOptions>(options => options.ContextLength = 999999), nameof(OllamaOptions.ContextLength)];
         yield return [new Action<OllamaOptions>(options => options.SceneNumPredict = 0), nameof(OllamaOptions.SceneNumPredict)];
         yield return [new Action<OllamaOptions>(options => options.SceneNumPredict = 999999), nameof(OllamaOptions.SceneNumPredict)];
+        yield return [new Action<OllamaOptions>(options => options.SceneFreshRetryNumPredict = 0), nameof(OllamaOptions.SceneFreshRetryNumPredict)];
         yield return [new Action<OllamaOptions>(options => options.SceneRepairNumPredict = -1), nameof(OllamaOptions.SceneRepairNumPredict)];
+        yield return [new Action<OllamaOptions>(options => options.SceneStructuredTopK = 0), nameof(OllamaOptions.SceneStructuredTopK)];
+        yield return [new Action<OllamaOptions>(options => options.SceneStructuredRepeatLastN = -1), nameof(OllamaOptions.SceneStructuredRepeatLastN)];
+        yield return [new Action<OllamaOptions>(options => options.RepetitionGuardMinCharacters = 127), nameof(OllamaOptions.RepetitionGuardMinCharacters)];
+        yield return [new Action<OllamaOptions>(options => options.RepetitionGuardMinBlockCharacters = 15), nameof(OllamaOptions.RepetitionGuardMinBlockCharacters)];
+        yield return [new Action<OllamaOptions>(options => options.RepetitionGuardMaxBlockCharacters = 31), nameof(OllamaOptions.RepetitionGuardMaxBlockCharacters)];
+        yield return [new Action<OllamaOptions>(options => options.RepetitionGuardMinConsecutiveRepeats = 1), nameof(OllamaOptions.RepetitionGuardMinConsecutiveRepeats)];
         yield return [new Action<OllamaOptions>(options => options.RequestTimeoutMinutes = 0), nameof(OllamaOptions.RequestTimeoutMinutes)];
         yield return [new Action<OllamaOptions>(options => options.SceneConnectTimeoutSeconds = 0), nameof(OllamaOptions.SceneConnectTimeoutSeconds)];
         yield return [new Action<OllamaOptions>(options => options.SceneFirstTokenTimeoutSeconds = 0), nameof(OllamaOptions.SceneFirstTokenTimeoutSeconds)];
@@ -74,6 +81,7 @@ public sealed class OllamaOptionsValidatorTests
         var options = ValidOptions();
         options.ContextLength = 7000;
         options.SceneNumPredict = 6144;
+        options.SceneFreshRetryNumPredict = 6144;
         options.SceneRepairNumPredict = 6144;
 
         var result = _validator.Validate(null, options);
@@ -113,7 +121,18 @@ public sealed class OllamaOptionsValidatorTests
         SceneHardTimeoutMinutes = 45,
         ContextLength = 32768,
         SceneBatchSize = 1,
-        SceneNumPredict = 6144,
-        SceneRepairNumPredict = 6144
+        SceneNumPredict = 3072,
+        SceneFreshRetryNumPredict = 3072,
+        SceneRepairNumPredict = 2048,
+        SceneStructuredTemperature = 0.2,
+        SceneStructuredTopP = 0.8,
+        SceneStructuredTopK = 40,
+        SceneStructuredRepeatPenalty = 1.15,
+        SceneStructuredRepeatLastN = 2048,
+        RepetitionGuardEnabled = true,
+        RepetitionGuardMinCharacters = 600,
+        RepetitionGuardMinBlockCharacters = 48,
+        RepetitionGuardMaxBlockCharacters = 512,
+        RepetitionGuardMinConsecutiveRepeats = 4
     };
 }

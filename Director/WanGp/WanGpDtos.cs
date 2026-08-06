@@ -47,7 +47,22 @@ public sealed class WanGpModelSchema
 public sealed class WanGpGenerationSubmission
 {
     public string ExternalJobId { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty;
     public JsonObject RawResponse { get; set; } = new();
+}
+
+public sealed class WanGpToolContractException : InvalidOperationException
+{
+    public WanGpToolContractException(string message) : base(message)
+    {
+    }
+}
+
+public sealed class WanGpMcpTransportException : InvalidOperationException
+{
+    public WanGpMcpTransportException(string message, Exception innerException) : base(message, innerException)
+    {
+    }
 }
 
 public sealed class WanGpJobSnapshot
@@ -62,6 +77,7 @@ public sealed class WanGpJobSnapshot
     public string? OutputPath { get; set; }
     public List<string> GeneratedFiles { get; set; } = [];
     public int? Seed { get; set; }
+    public DateTime? CompletedAt { get; set; }
 }
 
 public sealed class WanGpImageGenerationRequest

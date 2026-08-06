@@ -27,15 +27,18 @@ public sealed class MediaFileService : IMediaFileService
 
     private readonly WanGpOptions _options;
     private readonly IImageThumbnailService _thumbnailService;
+    private readonly IVideoMetadataService _metadataService;
     private readonly ILogger<MediaFileService> _logger;
 
     public MediaFileService(
         IOptions<WanGpOptions> options,
         IImageThumbnailService thumbnailService,
+        IVideoMetadataService metadataService,
         ILogger<MediaFileService> logger)
     {
         _options = options.Value;
         _thumbnailService = thumbnailService;
+        _metadataService = metadataService;
         _logger = logger;
     }
 
@@ -239,17 +242,41 @@ public sealed class MediaFileService : IMediaFileService
         var targetDirectory = Path.Combine(root, scene.FilmProjectId.ToString(), "scenes", scene.SceneNumber.ToString("000"), "videos");
         Directory.CreateDirectory(targetDirectory);
 
-        var fileName = $"{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}{extension.ToLowerInvariant()}";
+        var fileName = $"scene-{scene.SceneNumber:000}-video-v{versionNumber:000}-{Guid.NewGuid():N}{extension.ToLowerInvariant()}";
         var targetPath = Path.GetFullPath(Path.Combine(targetDirectory, fileName));
         if (!targetPath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException("Gecersiz hedef video yolu.");
         }
 
-        await using (var source = File.Open(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
-        await using (var target = File.Create(targetPath))
+        var stagingPath = Path.GetFullPath(Path.Combine(targetDirectory, $"{fileName}.{Guid.NewGuid():N}.tmp"));
+        try
         {
-            await source.CopyToAsync(target, cancellationToken);
+            await using (var source = File.Open(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            await using (var target = File.Create(stagingPath))
+            {
+                await source.CopyToAsync(target, cancellationToken);
+            }
+
+            var stagingInfo = new FileInfo(stagingPath);
+            var sourceInfo = new FileInfo(sourcePath);
+            if (stagingInfo.Length <= 0 || stagingInfo.Length != sourceInfo.Length)
+            {
+                throw new IOException("Director video staging kopyasi source boyutuyla uyusmuyor.");
+            }
+
+            var stagingMetadata = await _metadataService.ProbeAsync(stagingPath, cancellationToken);
+            if (!stagingMetadata.HasVideo || stagingMetadata.DurationSeconds is null or <= 0)
+            {
+                throw new InvalidOperationException("Director video staging dosyasi ffprobe dogrulamasindan gecmedi.");
+            }
+
+            File.Move(stagingPath, targetPath);
+        }
+        catch
+        {
+            TryDeleteStaging(stagingPath);
+            throw;
         }
 
         var fileInfo = new FileInfo(targetPath);
@@ -278,6 +305,21 @@ public sealed class MediaFileService : IMediaFileService
             IsSelected = isSelected,
             CreatedAt = DateTime.Now
         };
+    }
+
+    private static void TryDeleteStaging(string stagingPath)
+    {
+        try
+        {
+            if (File.Exists(stagingPath))
+            {
+                File.Delete(stagingPath);
+            }
+        }
+        catch
+        {
+            // Best-effort cleanup; source output and DB state are handled by caller.
+        }
     }
 
     private static (int Width, int Height) ReadImageSize(string path)

@@ -105,6 +105,76 @@ public sealed class StoryRepairFlowTests
     }
 
     [Fact]
+    public async Task InitialTokenLimit_UsesFreshRetryWithoutRawResponseEcho()
+    {
+        var client = new RepairFlowOllamaClient(repairSucceeds: true, firstCallTokenLimit: true);
+        var diagnostics = new RecordingDiagnosticWriter();
+        var service = CreateService(client, diagnostics);
+
+        var result = await service.GenerateWithOneRepairAsync<RepairResponse>(
+            [new OllamaChatMessage("user", "scene initial prompt")],
+            new { type = "object" },
+            null,
+            "Sahne 25",
+            CancellationToken.None,
+            OllamaOptions.DefaultTextModel,
+            new OllamaFailureContext(9, 25, "SingleSceneGeneration"));
+
+        Assert.Equal("repaired", result.Value);
+        Assert.Equal(2, client.CallCount);
+        Assert.Equal(new[] { "initial" }, diagnostics.Attempts);
+        Assert.DoesNotContain(RepairFlowOllamaClient.TruncatedRawMarker, client.Calls[1].Prompt);
+        Assert.Contains("discarded", client.Calls[1].Prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Malformed response", client.Calls[1].Prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.True(client.Calls[1].Prompt.Length <= client.Calls[0].Prompt.Length + 360);
+        Assert.Equal(3072, client.Calls[1].Settings?.NumPredict);
+    }
+
+    [Fact]
+    public async Task InitialTokenLimitFreshTokenLimit_StopsAfterTwoCallsAndUsesNoRepair()
+    {
+        var client = new RepairFlowOllamaClient(repairSucceeds: false, firstCallTokenLimit: true, secondCallTokenLimit: true);
+        var diagnostics = new RecordingDiagnosticWriter();
+        var service = CreateService(client, diagnostics);
+
+        var exception = await Assert.ThrowsAsync<StorySceneGenerationException>(() =>
+            service.GenerateWithOneRepairAsync<RepairResponse>(
+                [new OllamaChatMessage("user", "scene")],
+                new { type = "object" },
+                null,
+                "Sahne 25",
+                CancellationToken.None,
+                OllamaOptions.DefaultTextModel,
+                new OllamaFailureContext(9, 25, "SingleSceneGeneration")));
+
+        Assert.Equal(2, client.CallCount);
+        Assert.Equal(new[] { "initial", "fresh" }, diagnostics.Attempts);
+        Assert.Equal("TokenLimit", exception.Stage);
+        Assert.DoesNotContain("qwen3:4b", client.Models);
+    }
+
+    [Fact]
+    public async Task InitialRepetitionDetected_UsesFreshRetry()
+    {
+        var client = new RepairFlowOllamaClient(repairSucceeds: true, firstCallRepetition: true);
+        var diagnostics = new RecordingDiagnosticWriter();
+        var service = CreateService(client, diagnostics);
+
+        _ = await service.GenerateWithOneRepairAsync<RepairResponse>(
+            [new OllamaChatMessage("user", "scene")],
+            new { type = "object" },
+            null,
+            "Sahne 25",
+            CancellationToken.None,
+            OllamaOptions.DefaultTextModel,
+            new OllamaFailureContext(9, 25, "SingleSceneGeneration"));
+
+        Assert.Equal(2, client.CallCount);
+        Assert.DoesNotContain("Malformed response", client.Calls[1].Prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(3072, client.Calls[1].Settings?.NumPredict);
+    }
+
+    [Fact]
     public async Task DiagnosticWriterFailure_DoesNotMaskOriginalModelFailure()
     {
         var client = new RepairFlowOllamaClient(repairSucceeds: true, firstCallTooLarge: true);
@@ -188,10 +258,18 @@ public sealed class StoryRepairFlowTests
             throw new IOException("diagnostic path unavailable");
     }
 
-    private sealed class RepairFlowOllamaClient(bool repairSucceeds, bool firstCallReturnsValue = false, bool firstCallTooLarge = false) : IOllamaClient
+    private sealed class RepairFlowOllamaClient(
+        bool repairSucceeds,
+        bool firstCallReturnsValue = false,
+        bool firstCallTooLarge = false,
+        bool firstCallTokenLimit = false,
+        bool secondCallTokenLimit = false,
+        bool firstCallRepetition = false) : IOllamaClient
     {
+        public const string TruncatedRawMarker = "SCENE25_RAW_REPEAT_MARKER";
         public int CallCount { get; private set; }
         public List<string> Models { get; } = [];
+        public List<RecordedCall> Calls { get; } = [];
         public bool SecondCallUsedDeterministicSettings { get; private set; }
 
         public Task<OllamaHealthResult> CheckHealthAsync(CancellationToken cancellationToken = default) =>
@@ -221,6 +299,9 @@ public sealed class StoryRepairFlowTests
         {
             CallCount++;
             Models.Add(modelOverride ?? string.Empty);
+            Calls.Add(new RecordedCall(
+                string.Join("\n", messages.Select(message => message.Content)),
+                generationSettings));
             var metadata = new OllamaResponseMetadata
             {
                 Model = modelOverride ?? string.Empty,
@@ -233,6 +314,20 @@ public sealed class StoryRepairFlowTests
                 if (CallCount == 1 && firstCallTooLarge)
                 {
                     throw new OllamaResponseTooLargeException("too large", "{large", metadata);
+                }
+
+                if ((CallCount == 1 && firstCallTokenLimit) || (CallCount > 1 && secondCallTokenLimit))
+                {
+                    metadata.DoneReason = "length";
+                    metadata.ResponseTokenCount = 6144;
+                    throw new OllamaResponseTruncatedException("token limit", "{" + TruncatedRawMarker + new string('x', 5000), metadata);
+                }
+
+                if (CallCount == 1 && firstCallRepetition)
+                {
+                    metadata.RepeatedBlockLength = 80;
+                    metadata.RepeatedBlockCount = 4;
+                    throw new OllamaRepetitionDetectedException("repeat", "{" + TruncatedRawMarker, metadata);
                 }
 
                 throw new OllamaStructuredResponseException(
@@ -259,5 +354,7 @@ public sealed class StoryRepairFlowTests
                 Metadata = metadata
             });
         }
+
+        public sealed record RecordedCall(string Prompt, OllamaGenerationSettings? Settings);
     }
 }

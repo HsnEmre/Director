@@ -11,6 +11,7 @@ public sealed class StoryGenerationSmokeArgumentTests
         Assert.False(result.ShowHelp);
         Assert.False(result.Options.Write);
         Assert.Null(result.Options.ProjectId);
+        Assert.Null(result.Options.RunId);
         Assert.Equal(1, result.Options.MaxScenes);
     }
 
@@ -32,6 +33,16 @@ public sealed class StoryGenerationSmokeArgumentTests
         Assert.True(result.Success);
         Assert.False(result.Options.Write);
         Assert.Equal(9, result.Options.ProjectId);
+    }
+
+    [Fact]
+    public void RunIdWithoutWrite_IsReadOnly()
+    {
+        var result = StoryGenerationSmokeArguments.Parse(["--run-id", "1"]);
+
+        Assert.True(result.Success);
+        Assert.False(result.Options.Write);
+        Assert.Equal(1, result.Options.RunId);
     }
 
     [Fact]

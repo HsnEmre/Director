@@ -279,7 +279,13 @@ public sealed class AudioGenerationService : IAudioGenerationService
                 explicitPaths.Add(snapshot.OutputPath);
             }
 
-            var output = await _outputResolver.ResolveAudioOutputsAsync(before, startedAt, explicitPaths, TimeSpan.FromSeconds(1), linked.Token);
+            var output = await _outputResolver.ResolveAudioOutputsAsync(
+                before,
+                startedAt,
+                explicitPaths,
+                TimeSpan.FromSeconds(1),
+                externalJobId,
+                cancellationToken: linked.Token);
             if (output.Success)
             {
                 snapshot.Status = GenerationJobStatus.Completed;

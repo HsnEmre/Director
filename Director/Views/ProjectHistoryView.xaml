@@ -46,6 +46,7 @@
                     <DataGridTextColumn Header="Stil" Binding="{Binding VisualStyle}" Width="140" />
                     <DataGridTextColumn Header="Çözünürlük" Binding="{Binding Resolution}" Width="100" />
                     <DataGridTextColumn Header="Durum" Binding="{Binding Status}" Width="140" />
+                    <DataGridTextColumn Header="Otonom" Binding="{Binding AutonomousGenerationStatusText}" Width="180" />
                     <DataGridCheckBoxColumn Header="Hikaye" Binding="{Binding HasStory}" Width="70" />
                     <DataGridTextColumn Header="Üretilen" Binding="{Binding GeneratedSceneCount}" Width="80" />
                     <DataGridTextColumn Header="Oluşturma" Binding="{Binding CreatedAt}" Width="140" />

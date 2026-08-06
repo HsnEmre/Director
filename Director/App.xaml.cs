@@ -54,6 +54,7 @@ public partial class App : Application
                 services.AddSingleton<IValidateOptions<OllamaOptions>, OllamaOptionsValidator>();
                 services.Configure<WanGpOptions>(context.Configuration.GetSection("WanGp"));
                 services.AddSingleton<IValidateOptions<WanGpOptions>, WanGpOptionsValidator>();
+                services.Configure<AutonomousGenerationOptions>(context.Configuration.GetSection("AutonomousGeneration"));
                 services.AddHttpClient<IOllamaClient, OllamaClient>()
                     .ConfigurePrimaryHttpMessageHandler(serviceProvider => new SocketsHttpHandler
                     {
@@ -65,16 +66,19 @@ public partial class App : Application
                 services.AddSingleton<IStoryGenerationService, StoryGenerationService>();
                 services.AddSingleton<IStoryPromptBuilder, StoryPromptBuilder>();
                 services.AddSingleton<IOllamaFailureDiagnosticWriter, OllamaFailureDiagnosticWriter>();
-                services.AddSingleton<IWanGpClient, WanGpMcpClient>();
+                services.AddSingleton<IWanGpClient, WanGpStableMcpClient>();
                 services.AddSingleton<IWanGpProcessManager, WanGpProcessManager>();
                 services.AddSingleton<IWanGpRuntimeCoordinator, WanGpRuntimeCoordinator>();
                 services.AddSingleton<IWanGpLocalModelInventoryService, WanGpLocalModelInventoryService>();
+                services.AddSingleton<IWanGpFinalOutputResolver, WanGpFinalOutputResolver>();
                 services.AddSingleton<IWanGpOutputResolver, WanGpOutputResolver>();
                 services.AddSingleton<IWanGpVideoOutputResolver, WanGpVideoOutputResolver>();
                 services.AddSingleton<IGpuGenerationCoordinator, GpuGenerationCoordinator>();
                 services.AddSingleton<IApplicationActivityCenter, ApplicationActivityCenter>();
+                services.AddSingleton<IMediaOutputRecoveryLeaseCoordinator, MediaOutputRecoveryLeaseCoordinator>();
                 services.AddHttpClient<IOllamaModelLifecycleService, OllamaModelLifecycleService>();
                 services.AddSingleton<IMediaFileService, MediaFileService>();
+                services.AddSingleton<IMediaOutputRecoveryService, MediaOutputRecoveryService>();
                 services.AddSingleton<IImageThumbnailService, ImageThumbnailService>();
                 services.AddSingleton<IVideoMetadataService, VideoMetadataService>();
                 services.AddSingleton<IWanGpVideoInputContractResolver, WanGpVideoInputContractResolver>();
@@ -89,7 +93,14 @@ public partial class App : Application
                 services.AddSingleton<IVideoPromptComposerService, VideoPromptComposerService>();
                 services.AddSingleton<ILtxNativeDialoguePromptComposer, LtxNativeDialoguePromptComposer>();
                 services.AddSingleton<ILtxNativeDialogueCapabilityResolver, LtxNativeDialogueCapabilityResolver>();
+                services.AddSingleton<IVideoModelCapabilityService, VideoModelCapabilityService>();
                 services.AddSingleton<IFinalMovieAssemblyService, FfmpegFinalMovieAssemblyService>();
+                services.AddSingleton<IAutonomousGenerationStateMachine, AutonomousGenerationStateMachine>();
+                services.AddSingleton<AutonomousGenerationRetryPolicy>();
+                services.AddSingleton<IVideoGenerationRequestFactory, VideoGenerationRequestFactory>();
+                services.AddSingleton<IAutonomousGenerationRunService, AutonomousGenerationRunService>();
+                services.AddSingleton<IAutonomousGenerationOrchestrator, AutonomousGenerationOrchestrator>();
+                services.AddHostedService<AutonomousGenerationBackgroundWorker>();
                 services.AddSingleton<IImageGenerationService, ImageGenerationService>();
                 services.AddSingleton<IVideoGenerationService, VideoGenerationService>();
                 services.AddSingleton<IAudioGenerationService, AudioGenerationService>();

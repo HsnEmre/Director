@@ -1,137 +1,63 @@
-using System.IO;
-using Director.Options;
 using Director.Services.Interfaces;
-using Microsoft.Extensions.Options;
 
 namespace Director.WanGp;
 
 public sealed class WanGpAudioOutputResolver : IWanGpAudioOutputResolver
 {
-    private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".wav", ".flac", ".mp3", ".ogg", ".m4a"
-    };
+    private readonly IWanGpFinalOutputResolver _finalOutputResolver;
 
-    private readonly WanGpOptions _options;
-    private readonly IVideoMetadataService _metadataService;
-
-    public WanGpAudioOutputResolver(IOptions<WanGpOptions> options, IVideoMetadataService metadataService)
+    public WanGpAudioOutputResolver(IWanGpFinalOutputResolver finalOutputResolver)
     {
-        _options = options.Value;
-        _metadataService = metadataService;
+        _finalOutputResolver = finalOutputResolver;
     }
 
-    public WanGpOutputSnapshot CaptureSnapshot()
-    {
-        var snapshot = new WanGpOutputSnapshot();
-        foreach (var path in EnumerateAudioFiles())
-        {
-            var info = new FileInfo(path);
-            snapshot.Files[path] = new WanGpOutputFileState { Path = path, Length = info.Length, LastWriteTimeUtc = info.LastWriteTimeUtc };
-        }
+    public WanGpOutputSnapshot CaptureSnapshot() =>
+        _finalOutputResolver.CaptureSnapshot(WanGpOutputMediaKind.Audio);
 
-        return snapshot;
-    }
-
-    public async Task<WanGpOutputResolveResult> ResolveAudioOutputsAsync(WanGpOutputSnapshot beforeSnapshot, DateTime startedAt, IReadOnlyList<string> explicitPaths, TimeSpan? maxWait = null, CancellationToken cancellationToken = default)
+    public async Task<WanGpOutputResolveResult> ResolveAudioOutputsAsync(
+        WanGpOutputSnapshot beforeSnapshot,
+        DateTime startedAt,
+        IReadOnlyList<string> explicitPaths,
+        TimeSpan? maxWait = null,
+        string? externalJobId = null,
+        int? jobId = null,
+        int? sceneId = null,
+        int? seed = null,
+        DateTime? completedAt = null,
+        CancellationToken cancellationToken = default)
     {
-        foreach (var path in explicitPaths.Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.OrdinalIgnoreCase))
+        try
         {
-            var candidate = await TryBuildCandidateAsync(path, false, cancellationToken);
-            if (candidate is not null)
+            var resolution = await _finalOutputResolver.ResolveAsync(new WanGpFinalOutputResolveRequest
             {
-                return new WanGpOutputResolveResult { Success = true, Message = "MCP audio artifact yolu ile output bulundu.", Candidates = [candidate] };
-            }
-        }
+                MediaKind = WanGpOutputMediaKind.Audio,
+                BeforeSnapshot = beforeSnapshot,
+                StartedAt = startedAt,
+                CompletedAt = completedAt,
+                ExplicitPaths = explicitPaths,
+                ExternalJobId = externalJobId,
+                JobId = jobId,
+                SceneId = sceneId,
+                Seed = seed,
+                MaxWait = maxWait
+            }, cancellationToken);
 
-        var deadline = DateTime.Now.Add(maxWait ?? TimeSpan.FromSeconds(30));
-        while (DateTime.Now <= deadline)
-        {
-            var candidates = new List<WanGpOutputCandidate>();
-            foreach (var path in EnumerateAudioFiles())
+            return new WanGpOutputResolveResult
             {
-                var fullPath = Path.GetFullPath(path);
-                if (beforeSnapshot.Files.ContainsKey(fullPath))
-                {
-                    continue;
-                }
-
-                var info = new FileInfo(fullPath);
-                if (info.Length <= 0 || info.LastWriteTime < startedAt.AddSeconds(-2))
-                {
-                    continue;
-                }
-
-                var candidate = await TryBuildCandidateAsync(fullPath, true, cancellationToken);
-                if (candidate is not null)
-                {
-                    candidates.Add(candidate);
-                }
-            }
-
-            if (candidates.Count == 1)
+                Success = true,
+                Message = resolution.Message,
+                Candidates = [resolution.Candidate]
+            };
+        }
+        catch (WanGpAmbiguousOutputException ex)
+        {
+            return new WanGpOutputResolveResult
             {
-                return new WanGpOutputResolveResult { Success = true, Message = "Output klasoru snapshot farki ile audio bulundu.", Candidates = candidates };
-            }
-
-            if (candidates.Count > 1)
-            {
-                return new WanGpOutputResolveResult { Success = false, IsAmbiguous = true, Message = "Birden fazla belirsiz audio output bulundu.", Candidates = candidates };
-            }
-
-            await Task.Delay(1000, cancellationToken);
+                Success = false,
+                IsAmbiguous = true,
+                Message = ex.Message,
+                Candidates = ex.Candidates.ToList()
+            };
         }
-
-        return new WanGpOutputResolveResult { Success = false, Message = "WanGP audio output dosyasi bulunamadi." };
-    }
-
-    private async Task<WanGpOutputCandidate?> TryBuildCandidateAsync(string path, bool requireUnderOutputRoot, CancellationToken cancellationToken)
-    {
-        var fullPath = Path.GetFullPath(path);
-        if (requireUnderOutputRoot && !IsUnderOutputRoot(fullPath))
-        {
-            return null;
-        }
-
-        if (!File.Exists(fullPath) || !AudioExtensions.Contains(Path.GetExtension(fullPath)))
-        {
-            return null;
-        }
-
-        var first = new FileInfo(fullPath);
-        await Task.Delay(1000, cancellationToken);
-        var second = new FileInfo(fullPath);
-        if (first.Length <= 0 || first.Length != second.Length || first.LastWriteTimeUtc != second.LastWriteTimeUtc)
-        {
-            return null;
-        }
-
-        var metadata = await _metadataService.ProbeAsync(fullPath, cancellationToken);
-        if (metadata.DurationSeconds is <= 0)
-        {
-            return null;
-        }
-
-        return new WanGpOutputCandidate { FilePath = fullPath, FileSize = second.Length, CreatedAt = second.CreationTime, LastWriteTime = second.LastWriteTime };
-    }
-
-    private IEnumerable<string> EnumerateAudioFiles()
-    {
-        var outputRoot = _options.GetEffectiveOutputDirectory();
-        if (string.IsNullOrWhiteSpace(outputRoot) || !Directory.Exists(outputRoot))
-        {
-            return [];
-        }
-
-        return Directory.EnumerateFiles(outputRoot, "*.*", SearchOption.AllDirectories)
-            .Where(path => AudioExtensions.Contains(Path.GetExtension(path)))
-            .Select(Path.GetFullPath);
-    }
-
-    private bool IsUnderOutputRoot(string fullPath)
-    {
-        var outputRoot = Path.GetFullPath(_options.GetEffectiveOutputDirectory());
-        return fullPath.StartsWith(outputRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(fullPath, outputRoot, StringComparison.OrdinalIgnoreCase);
     }
 }

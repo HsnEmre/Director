@@ -61,6 +61,21 @@
                             </StackPanel>
                         </Grid>
 
+                        <Border Style="{StaticResource InfoCardStyle}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <CheckBox Content="Tek sahnelik smoke icin hedef sureyi saniye olarak gir"
+                                          IsChecked="{Binding UseSecondBasedTargetDuration, UpdateSourceTrigger=PropertyChanged}" />
+                                <TextBlock Text="DB semasi degismez; klip sayisi smoke hedef saniyesine gore hesaplanir."
+                                           Foreground="{StaticResource BrushMutedText}"
+                                           TextWrapping="Wrap"
+                                           Margin="0,8,0,0" />
+                                <TextBlock Text="Hedef Sure (saniye)" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,7" />
+                                <TextBox Text="{Binding TargetDurationSeconds, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}"
+                                         IsEnabled="{Binding UseSecondBasedTargetDuration}" />
+                                <TextBlock Text="{Binding TargetDurationSecondsError}" Style="{StaticResource ValidationTextStyle}" Visibility="{Binding TargetDurationSecondsError, Converter={StaticResource EmptyStringToVisibilityConverter}}" />
+                            </StackPanel>
+                        </Border>
+
                         <Border Style="{StaticResource InfoCardStyle}" Margin="0,16,0,0" BorderBrush="{StaticResource BrushAccent}">
                             <StackPanel>
                                 <TextBlock Text="Hesaplanan Klip Sayısı" Foreground="{StaticResource BrushMutedText}" />
@@ -110,13 +125,39 @@
                             </StackPanel>
                             <StackPanel Grid.Column="2">
                                 <TextBlock Text="Çözünürlük" Style="{StaticResource FieldLabelStyle}" />
-                                <ComboBox ItemsSource="{Binding ResolutionOptions}" SelectedItem="{Binding Resolution, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" />
+                                <ComboBox ItemsSource="{Binding ResolutionOptions}"
+                                          SelectedValuePath="."
+                                          SelectedValue="{Binding Resolution, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" />
                             </StackPanel>
                         </Grid>
 
                         <CheckBox Content="Anlatıcı Kullan" IsChecked="{Binding UseNarrator, UpdateSourceTrigger=PropertyChanged}" Margin="0,18,0,0" />
                         <TextBlock Text="Anlatıcı Tonu" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,7" />
                         <ComboBox ItemsSource="{Binding NarratorToneOptions}" Text="{Binding NarratorTone, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}" IsEditable="True" IsEnabled="{Binding UseNarrator}" />
+
+                        <Border Style="{StaticResource InfoCardStyle}" Margin="0,18,0,0">
+                            <StackPanel>
+                                <CheckBox Content="Otonom Mod: hikaye, gorsel, video ve ses uretimini arka planda sirayla yurut"
+                                          IsChecked="{Binding IsAutonomousMode, UpdateSourceTrigger=PropertyChanged}" />
+                                <CheckBox Content="LTX native dialogue tercih et"
+                                          IsChecked="{Binding PreferLtxNativeDialogue, UpdateSourceTrigger=PropertyChanged}"
+                                          Margin="0,8,0,0" />
+                                <TextBlock Text="Bu mod UI secimini taklit etmez; persistent run kaydi ve sahne checkpoint'leri uzerinden resume eder."
+                                           Foreground="{StaticResource BrushMutedText}"
+                                           TextWrapping="Wrap"
+                                           Margin="0,8,0,0" />
+                                <StackPanel Visibility="{Binding HasAutonomousRun, Converter={StaticResource BoolToVisibilityConverter}}" Margin="0,12,0,0">
+                                    <TextBlock Text="{Binding AutonomousStatusText}" Foreground="{StaticResource BrushText}" TextWrapping="Wrap" />
+                                    <ProgressBar Height="8" Minimum="0" Maximum="100" Value="{Binding AutonomousProgressPercentage, Mode=OneWay}" Margin="0,8,0,0" />
+                                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                        <Button Content="Pause" Command="{Binding PauseAutonomousCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,8,0" />
+                                        <Button Content="Resume" Command="{Binding ResumeAutonomousCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,8,0" />
+                                        <Button Content="Cancel" Command="{Binding CancelAutonomousCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,8,0" />
+                                        <Button Content="Retry" Command="{Binding RetryAutonomousCommand}" Style="{StaticResource SecondaryButtonStyle}" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
                 </Border>
             </Grid>
@@ -132,7 +173,7 @@
                 <StackPanel Grid.Column="1" Orientation="Horizontal">
                     <Button Content="Formu Temizle" Command="{Binding ClearFormCommand}" Style="{StaticResource GhostButtonStyle}" Margin="0,0,10,0" />
                     <Button Content="Taslak Kaydet" Command="{Binding SaveDraftCommand}" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,10,0" />
-                    <Button Content="Hikayeyi Hazırlamaya Devam Et" Command="{Binding ContinueCommand}" Style="{StaticResource PrimaryButtonStyle}" />
+                    <Button Content="{Binding PrimaryActionText}" Command="{Binding ContinueCommand}" Style="{StaticResource PrimaryButtonStyle}" />
                 </StackPanel>
             </Grid>
         </Border>

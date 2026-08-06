@@ -19,6 +19,13 @@ public sealed class StoryGenerationService : IStoryGenerationService
 {
     private const int OutlineBlockSize = 1;
     private const int ResumeSceneBatchSize = 1;
+    private const int RepairExcerptMaxCharacters = 2400;
+    private const int StoryBibleMinimumNumPredict = 768;
+    private const int StoryBibleBriefInitialNumPredict = 1536;
+    private const int StoryBibleBriefRetryNumPredict = 2048;
+    private const int StoryBibleDetailedMaxNumPredict = 8192;
+    private const int StoryBibleContextMarginTokens = 1024;
+    public const string OpeningSceneContinuityFromPreviousScene = "Opening scene; no previous scene.";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly string[] VideoPromptAudioTerms =
     {
@@ -92,10 +99,10 @@ public sealed class StoryGenerationService : IStoryGenerationService
 
             var resumeState = await LoadResumeStateAsync(project.Id, cancellationToken);
             EnsureNoDuplicateScenes(resumeState, project.Id);
-            if (resumeState.Story is not null && resumeState.CharacterCount > 0)
+            if (resumeState.Story is not null)
             {
                 Report(progress, "Devam", "Mevcut hikaye bulundu, tekrar uretilmeyecek.", resumeState.SceneNumbers.Count, project.CalculatedClipCount, 6, GenerationLogLevel.Success);
-                Report(progress, "Devam", $"{resumeState.CharacterCount} karakter bulundu.", resumeState.SceneNumbers.Count, project.CalculatedClipCount, 7, GenerationLogLevel.Success);
+                Report(progress, "Devam", resumeState.CharacterCount == 0 ? "Karaktersiz gorsel hikaye bulundu." : $"{resumeState.CharacterCount} karakter bulundu.", resumeState.SceneNumbers.Count, project.CalculatedClipCount, 7, GenerationLogLevel.Success);
                 Report(progress, "Devam", $"Kaydedilmis sahne sayisi: {resumeState.SceneNumbers.Count}/{project.CalculatedClipCount}", resumeState.SceneNumbers.Count, project.CalculatedClipCount, 8, GenerationLogLevel.Information);
 
                 if (TryGetCompletionError(resumeState.SceneNumbers, resumeState.TotalDurationSeconds, project.CalculatedClipCount, project.ClipDurationSeconds) is null)
@@ -242,13 +249,13 @@ public sealed class StoryGenerationService : IStoryGenerationService
 
         var state = await LoadResumeStateAsync(project.Id, cancellationToken);
         EnsureNoDuplicateScenes(state, project.Id);
-        if (state.Story is null || state.CharacterCount == 0)
+        if (state.Story is null)
         {
-            throw new InvalidOperationException("Mevcut FilmStory ve StoryCharacter kayitlari bulunmadan sahne resume baslatilamaz.");
+            throw new InvalidOperationException("Mevcut FilmStory kaydi bulunmadan sahne resume baslatilamaz.");
         }
 
         Report(progress, "Devam", "Mevcut hikaye bulundu, tekrar uretilmeyecek.", state.SceneNumbers.Count, project.CalculatedClipCount, 5, GenerationLogLevel.Success);
-        Report(progress, "Devam", $"{state.CharacterCount} karakter bulundu.", state.SceneNumbers.Count, project.CalculatedClipCount, 6, GenerationLogLevel.Success);
+        Report(progress, "Devam", state.CharacterCount == 0 ? "Karaktersiz gorsel hikaye bulundu." : $"{state.CharacterCount} karakter bulundu.", state.SceneNumbers.Count, project.CalculatedClipCount, 6, GenerationLogLevel.Success);
         Report(progress, "Devam", $"Kaydedilmis sahne sayisi: {state.SceneNumbers.Count}/{project.CalculatedClipCount}", state.SceneNumbers.Count, project.CalculatedClipCount, 7, GenerationLogLevel.Information);
 
         if (TryGetCompletionError(state.SceneNumbers, state.TotalDurationSeconds, project.CalculatedClipCount, project.ClipDurationSeconds) is null)
@@ -353,22 +360,18 @@ public sealed class StoryGenerationService : IStoryGenerationService
         OllamaFailureContext? failureContext = null,
         Action<T>? validateResponse = null,
         int gpuProjectId = 0,
-        int gpuSceneId = 0)
+        int gpuSceneId = 0,
+        OllamaGenerationSettings? initialGenerationSettings = null,
+        OllamaGenerationSettings? freshRetryGenerationSettings = null,
+        OllamaGenerationSettings? repairGenerationSettings = null)
     {
         var selectedModel = string.IsNullOrWhiteSpace(modelOverride) ? _options.StoryTextModel : modelOverride;
         var streamProgress = CreateOllamaStreamProgress(progress, phase);
-        var initialSettings = failureContext is null
-            ? null
-            : new OllamaGenerationSettings
-            {
-                OperationName = failureContext.OperationName,
-                FilmProjectId = failureContext.FilmProjectId,
-                SceneNumber = failureContext.SceneNumber,
-                Think = false
-            };
+        var initialSettings = initialGenerationSettings ?? CreateInitialGenerationSettings(failureContext);
         OllamaResponseException initialFailure;
         try
         {
+            LogStructuredAttempt("initial", phase, selectedModel, messages, initialSettings);
             var result = await ExecuteGpuCallAsync(
                 () => _ollamaClient.ChatStructuredDetailedAsync<T>(
                     messages,
@@ -382,6 +385,7 @@ public sealed class StoryGenerationService : IStoryGenerationService
                 failureContext?.SceneNumber ?? gpuSceneId,
                 cancellationToken);
             ValidateDetailedResult(result, validateResponse);
+            LogStructuredSuccess("initial", phase, selectedModel, result.Metadata, "passed");
             Report(progress, phase, "Ollama response alindi ve deserialize edildi.", 0, 0, null, GenerationLogLevel.Success);
             return result.Value;
         }
@@ -396,6 +400,32 @@ public sealed class StoryGenerationService : IStoryGenerationService
         }
 
         var initialLogPath = await WriteFailureDiagnosticAsync(failureContext, "initial", initialFailure, cancellationToken);
+        if (RequiresFreshRetry(initialFailure))
+        {
+            _logger.LogWarning(
+                "Structured response hit output-limit/repetition. Model={Model}; Stage={Stage}; ContentLength={ContentLength}; Done={Done}; DoneReason={DoneReason}; fresh retry will run once without raw echo. Diagnostic={DiagnosticPath}",
+                selectedModel,
+                initialFailure.Stage,
+                initialFailure.ResponseContent.Length,
+                initialFailure.Metadata.Done,
+                initialFailure.Metadata.DoneReason,
+                initialLogPath);
+            Report(progress, phase, $"Model cevabi {initialFailure.Stage} olarak durdu; ham cikti atilip ayni 30B modelle tek fresh kisa yeniden uretim deneniyor.", 0, 0, null, GenerationLogLevel.Warning);
+            return await RunFreshRetryAsync(
+                messages,
+                schema,
+                progress,
+                phase,
+                cancellationToken,
+                selectedModel,
+                failureContext,
+                validateResponse,
+                streamProgress,
+                gpuProjectId,
+                gpuSceneId,
+                freshRetryGenerationSettings);
+        }
+
         _logger.LogWarning(
             "Structured response failed. Model={Model}; Stage={Stage}; ContentLength={ContentLength}; Done={Done}; DoneReason={DoneReason}; repair will run once. Diagnostic={DiagnosticPath}",
             selectedModel,
@@ -409,21 +439,14 @@ public sealed class StoryGenerationService : IStoryGenerationService
         var repairMessages = new List<OllamaChatMessage>
         {
             new("system", "Repair one malformed structured response. Return exactly one JSON object matching the supplied schema. Return JSON only. Do not include markdown, code fences, explanations or commentary. Preserve the original sceneNumber and intended content. Keep values concise."),
-            new("user", $"Expected JSON schema:\n{JsonSerializer.Serialize(schema, JsonOptions)}\n\nMalformed response to repair:\n{initialFailure.ResponseContent}")
+            new("user", BuildRepairGuidance(failureContext)),
+            new("user", $"Expected JSON schema:\n{JsonSerializer.Serialize(schema, JsonOptions)}\n\nMalformed response excerpt to repair; do not echo it verbatim:\n{BuildRepairExcerpt(initialFailure.ResponseContent)}")
         };
-        var repairSettings = new OllamaGenerationSettings
-        {
-            Temperature = 0,
-            TopP = 0.1,
-            NumPredict = Math.Max(_options.SceneNumPredict, _options.SceneRepairNumPredict),
-            Think = false,
-            OperationName = failureContext?.OperationName,
-            FilmProjectId = failureContext?.FilmProjectId,
-            SceneNumber = failureContext?.SceneNumber
-        };
+        var repairSettings = repairGenerationSettings ?? CreateRepairGenerationSettings(failureContext);
 
         try
         {
+            LogStructuredAttempt("repair", phase, selectedModel, repairMessages, repairSettings);
             var repaired = await ExecuteGpuCallAsync(
                 () => _ollamaClient.ChatStructuredDetailedAsync<T>(
                     repairMessages,
@@ -437,6 +460,7 @@ public sealed class StoryGenerationService : IStoryGenerationService
                 failureContext?.SceneNumber ?? gpuSceneId,
                 cancellationToken);
             ValidateDetailedResult(repaired, validateResponse);
+            LogStructuredSuccess("repair", phase, selectedModel, repaired.Metadata, "passed");
             Report(progress, phase, "Repair cevabi dogrulandi.", 0, 0, null, GenerationLogLevel.Success);
             return repaired.Value;
         }
@@ -455,6 +479,161 @@ public sealed class StoryGenerationService : IStoryGenerationService
         }
     }
 
+    private async Task<T> RunFreshRetryAsync<T>(
+        IReadOnlyList<OllamaChatMessage> originalMessages,
+        object schema,
+        IProgress<StoryGenerationProgress>? progress,
+        string phase,
+        CancellationToken cancellationToken,
+        string selectedModel,
+        OllamaFailureContext? failureContext,
+        Action<T>? validateResponse,
+        IProgress<OllamaStreamProgress> streamProgress,
+        int gpuProjectId,
+        int gpuSceneId,
+        OllamaGenerationSettings? freshRetryGenerationSettings)
+    {
+        var freshMessages = BuildFreshRetryMessages(originalMessages);
+        var freshSettings = freshRetryGenerationSettings ?? CreateFreshRetryGenerationSettings(failureContext);
+        try
+        {
+            LogStructuredAttempt("fresh", phase, selectedModel, freshMessages, freshSettings);
+            var fresh = await ExecuteGpuCallAsync(
+                () => _ollamaClient.ChatStructuredDetailedAsync<T>(
+                    freshMessages,
+                    schema,
+                    selectedModel,
+                    TimeSpan.FromMinutes(Math.Max(1, _options.SceneHardTimeoutMinutes)),
+                    cancellationToken,
+                    streamProgress,
+                    freshSettings),
+                failureContext?.FilmProjectId ?? gpuProjectId,
+                failureContext?.SceneNumber ?? gpuSceneId,
+                cancellationToken);
+            ValidateDetailedResult(fresh, validateResponse);
+            LogStructuredSuccess("fresh", phase, selectedModel, fresh.Metadata, "passed");
+            Report(progress, phase, "Fresh kisa yeniden uretim cevabi dogrulandi.", 0, 0, null, GenerationLogLevel.Success);
+            return fresh.Value;
+        }
+        catch (OllamaResponseException freshFailure)
+        {
+            var freshLogPath = await WriteFailureDiagnosticAsync(failureContext, "fresh", freshFailure, cancellationToken);
+            _logger.LogWarning(
+                "Fresh retry response failed. Model={Model}; Stage={Stage}; ContentLength={ContentLength}; Done={Done}; DoneReason={DoneReason}; Diagnostic={DiagnosticPath}",
+                selectedModel,
+                freshFailure.Stage,
+                freshFailure.ResponseContent.Length,
+                freshFailure.Metadata.Done,
+                freshFailure.Metadata.DoneReason,
+                freshLogPath);
+            throw CreateSceneFailureOrOriginal(failureContext, freshFailure, freshLogPath);
+        }
+    }
+
+    private OllamaGenerationSettings? CreateInitialGenerationSettings(OllamaFailureContext? context)
+    {
+        if (context is null)
+        {
+            return null;
+        }
+
+        var settings = CreateBaseGenerationSettings(context);
+        if (IsSingleSceneGeneration(context))
+        {
+            ApplySceneStructuredSettings(settings, _options.SceneNumPredict);
+        }
+
+        return settings;
+    }
+
+    private OllamaGenerationSettings CreateFreshRetryGenerationSettings(OllamaFailureContext? context)
+    {
+        var settings = CreateBaseGenerationSettings(context);
+        if (context is not null && IsSingleSceneGeneration(context))
+        {
+            ApplySceneStructuredSettings(settings, _options.SceneFreshRetryNumPredict);
+        }
+        else
+        {
+            settings.Temperature = 0.2;
+            settings.TopP = 0.7;
+            settings.NumPredict = _options.SceneFreshRetryNumPredict;
+        }
+
+        return settings;
+    }
+
+    private OllamaGenerationSettings CreateRepairGenerationSettings(OllamaFailureContext? context)
+    {
+        var settings = CreateBaseGenerationSettings(context);
+        settings.Temperature = 0;
+        settings.TopP = 0.1;
+        settings.NumPredict = context is not null && IsSingleSceneGeneration(context)
+            ? _options.SceneRepairNumPredict
+            : Math.Max(_options.SceneNumPredict, _options.SceneRepairNumPredict);
+        return settings;
+    }
+
+    private static OllamaGenerationSettings CreateBaseGenerationSettings(OllamaFailureContext? context) =>
+        new()
+        {
+            Think = false,
+            OperationName = context?.OperationName,
+            FilmProjectId = context?.FilmProjectId,
+            SceneNumber = context?.SceneNumber
+        };
+
+    private void ApplySceneStructuredSettings(OllamaGenerationSettings settings, int numPredict)
+    {
+        settings.Temperature = _options.SceneStructuredTemperature;
+        settings.TopP = _options.SceneStructuredTopP;
+        settings.TopK = _options.SceneStructuredTopK;
+        settings.RepeatPenalty = _options.SceneStructuredRepeatPenalty;
+        settings.RepeatLastN = _options.SceneStructuredRepeatLastN;
+        settings.NumPredict = numPredict;
+    }
+
+    private static IReadOnlyList<OllamaChatMessage> BuildFreshRetryMessages(IReadOnlyList<OllamaChatMessage> originalMessages)
+    {
+        var messages = originalMessages.ToList();
+        messages.Add(new OllamaChatMessage(
+            "user",
+            "The previous attempt was discarded because it hit an output limit or repetition loop. Do not use, quote, continue or repair that output. Regenerate freshly from the original instructions only. Return one complete concise JSON object. Keep comma-separated negative prompts short, unique, and non-repeating."));
+        return messages;
+    }
+
+    private static string BuildRepairExcerpt(string responseContent)
+    {
+        if (responseContent.Length <= RepairExcerptMaxCharacters)
+        {
+            return responseContent;
+        }
+
+        var head = RepairExcerptMaxCharacters / 2;
+        var tail = RepairExcerptMaxCharacters - head;
+        return responseContent[..head] + "\n...[middle omitted from repair prompt]...\n" + responseContent[^tail..];
+    }
+
+    private static string BuildRepairGuidance(OllamaFailureContext? failureContext)
+    {
+        if (failureContext is null || !IsSingleSceneGeneration(failureContext))
+        {
+            return "Repair all validation errors while preserving the original intent.";
+        }
+
+        return failureContext.SceneNumber == 1
+            ? $"Single-scene repair rule: for scene 1, continuityFromPreviousScene must be exactly \"{OpeningSceneContinuityFromPreviousScene}\" because there is no previous scene."
+            : "Single-scene repair rule: for scene 2 and later, continuityFromPreviousScene is required and must briefly describe concrete visual, spatial, temporal or action continuity from the previous scene.";
+    }
+
+    private static bool RequiresFreshRetry(OllamaResponseException exception) =>
+        exception is OllamaResponseTruncatedException or OllamaRepetitionDetectedException ||
+        exception.Stage.Equals("TokenLimit", StringComparison.OrdinalIgnoreCase) ||
+        exception.Stage.Equals("RepetitionDetected", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsSingleSceneGeneration(OllamaFailureContext context) =>
+        context.OperationName.Equals("SingleSceneGeneration", StringComparison.OrdinalIgnoreCase);
+
     private async Task<T> ExecuteGpuCallAsync<T>(
         Func<Task<T>> operation,
         int filmProjectId,
@@ -472,6 +651,52 @@ public sealed class StoryGenerationService : IStoryGenerationService
             sceneId,
             cancellationToken);
         return await operation();
+    }
+
+    private void LogStructuredAttempt(
+        string attemptType,
+        string phase,
+        string model,
+        IReadOnlyList<OllamaChatMessage> messages,
+        OllamaGenerationSettings? settings)
+    {
+        var promptCharacters = settings?.PromptCharacterCount ?? messages.Sum(message => message.Content?.Length ?? 0);
+        var estimatedPromptTokens = settings?.EstimatedPromptTokens ?? EstimatePromptTokens(messages.Select(message => message.Content ?? string.Empty).ToArray());
+        _logger.LogInformation(
+            "Structured generation attempt. Phase={Phase}; Attempt={Attempt}; Model={Model}; Operation={Operation}; OutputProfile={OutputProfile}; PromptCharacters={PromptCharacters}; EstimatedPromptTokens={EstimatedPromptTokens}; Context={Context}; NumPredict={NumPredict}",
+            phase,
+            attemptType,
+            model,
+            settings?.OperationName ?? string.Empty,
+            settings?.OutputProfile ?? "Default",
+            promptCharacters,
+            estimatedPromptTokens,
+            _options.ContextLength,
+            settings?.NumPredict ?? _options.SceneNumPredict);
+    }
+
+    private void LogStructuredSuccess(
+        string attemptType,
+        string phase,
+        string model,
+        OllamaResponseMetadata metadata,
+        string validation)
+    {
+        _logger.LogInformation(
+            "Structured generation completed. Phase={Phase}; Attempt={Attempt}; Model={Model}; Operation={Operation}; OutputProfile={OutputProfile}; PromptCharacters={PromptCharacters}; EstimatedPromptTokens={EstimatedPromptTokens}; PromptTokens={PromptTokens}; ResponseTokens={ResponseTokens}; ResponseCharacters={ResponseCharacters}; Done={Done}; DoneReason={DoneReason}; Validation={Validation}",
+            phase,
+            attemptType,
+            model,
+            metadata.OperationName,
+            metadata.OutputProfile ?? "Default",
+            metadata.PromptCharacterCount,
+            metadata.EstimatedPromptTokens,
+            metadata.PromptTokenCount,
+            metadata.ResponseTokenCount,
+            metadata.ResponseCharacterCount,
+            metadata.Done,
+            metadata.DoneReason,
+            validation);
     }
 
     private static void ValidateDetailedResult<T>(OllamaStructuredResult<T> result, Action<T>? validator)
@@ -525,20 +750,86 @@ public sealed class StoryGenerationService : IStoryGenerationService
         OllamaFailureContext? context,
         OllamaResponseException exception,
         string logPath) =>
-        context is null
+        context is null || context.OperationName.StartsWith("StoryBible", StringComparison.OrdinalIgnoreCase)
             ? exception
             : new StorySceneGenerationException(context.FilmProjectId, context.SceneNumber, exception.Stage, logPath, exception);
 
-    private async Task<StoryBibleResponse> GenerateStoryBibleWithCharacterRepairAsync(
+    internal static StoryBibleOutputProfile SelectStoryBibleOutputProfile(FilmProject project) =>
+        project.CalculatedClipCount <= 2 && !project.UseNarrator
+            ? StoryBibleOutputProfile.BriefVisual
+            : StoryBibleOutputProfile.Detailed;
+
+    internal StoryBibleOutputBudget CalculateStoryBibleOutputBudget(
+        FilmProject project,
+        StoryBibleOutputProfile profile,
+        StoryBibleGenerationAttempt attempt,
+        int estimatedPromptTokens)
+    {
+        var desired = attempt switch
+        {
+            StoryBibleGenerationAttempt.Initial when profile == StoryBibleOutputProfile.BriefVisual => StoryBibleBriefInitialNumPredict,
+            StoryBibleGenerationAttempt.FreshRetry when profile == StoryBibleOutputProfile.BriefVisual => StoryBibleBriefRetryNumPredict,
+            StoryBibleGenerationAttempt.CharacterRepair when profile == StoryBibleOutputProfile.BriefVisual => StoryBibleBriefInitialNumPredict,
+            StoryBibleGenerationAttempt.CharacterRepair => Math.Max(_options.SceneRepairNumPredict, _options.SceneNumPredict),
+            StoryBibleGenerationAttempt.FreshRetry => Math.Clamp(_options.SceneFreshRetryNumPredict, _options.SceneNumPredict, StoryBibleDetailedMaxNumPredict),
+            _ => Math.Clamp(2048 + project.CalculatedClipCount * 160, _options.SceneNumPredict, StoryBibleDetailedMaxNumPredict)
+        };
+
+        var contextCap = Math.Max(StoryBibleMinimumNumPredict, _options.ContextLength - estimatedPromptTokens - StoryBibleContextMarginTokens);
+        var cappedMaximum = Math.Min(StoryBibleDetailedMaxNumPredict, contextCap);
+        var numPredict = Math.Min(Math.Max(desired, StoryBibleMinimumNumPredict), cappedMaximum);
+        return new StoryBibleOutputBudget(
+            profile,
+            attempt,
+            numPredict,
+            estimatedPromptTokens,
+            _options.ContextLength,
+            StoryBibleContextMarginTokens,
+            desired,
+            cappedMaximum);
+    }
+
+    private OllamaGenerationSettings CreateStoryBibleGenerationSettings(
+        FilmProject project,
+        IReadOnlyList<OllamaChatMessage> messages,
+        StoryBibleOutputProfile profile,
+        StoryBibleGenerationAttempt attempt)
+    {
+        var promptCharacters = messages.Sum(message => message.Content?.Length ?? 0);
+        var estimatedPromptTokens = EstimatePromptTokens(messages.Select(message => message.Content ?? string.Empty).ToArray());
+        var budget = CalculateStoryBibleOutputBudget(project, profile, attempt, estimatedPromptTokens);
+        var operationName = attempt == StoryBibleGenerationAttempt.CharacterRepair
+            ? "StoryBibleCharacterRepair"
+            : "StoryBibleGeneration";
+        var settings = CreateBaseGenerationSettings(new OllamaFailureContext(project.Id, 0, operationName));
+        settings.Temperature = profile == StoryBibleOutputProfile.BriefVisual ? 0.2 : _options.SceneStructuredTemperature;
+        settings.TopP = profile == StoryBibleOutputProfile.BriefVisual ? 0.65 : _options.SceneStructuredTopP;
+        settings.TopK = _options.SceneStructuredTopK;
+        settings.RepeatPenalty = _options.SceneStructuredRepeatPenalty;
+        settings.RepeatLastN = _options.SceneStructuredRepeatLastN;
+        settings.NumPredict = budget.NumPredict;
+        settings.OutputProfile = profile.ToString();
+        settings.PromptCharacterCount = promptCharacters;
+        settings.EstimatedPromptTokens = estimatedPromptTokens;
+        return settings;
+    }
+
+    internal async Task<StoryBibleResponse> GenerateStoryBibleWithCharacterRepairAsync(
         FilmProject project,
         IProgress<StoryGenerationProgress>? progress,
         CancellationToken cancellationToken)
     {
+        var profile = SelectStoryBibleOutputProfile(project);
         var messages = new List<OllamaChatMessage>
         {
             new("system", _promptBuilder.BuildStoryBibleSystemPrompt()),
-            new("user", _promptBuilder.BuildStoryBibleUserPrompt(project))
+            new("user", profile == StoryBibleOutputProfile.BriefVisual
+                ? _promptBuilder.BuildStoryBibleConciseUserPrompt(project)
+                : _promptBuilder.BuildStoryBibleUserPrompt(project))
         };
+        var initialSettings = CreateStoryBibleGenerationSettings(project, messages, profile, StoryBibleGenerationAttempt.Initial);
+        var freshSettings = CreateStoryBibleGenerationSettings(project, BuildFreshRetryMessages(messages), profile, StoryBibleGenerationAttempt.FreshRetry);
+        var storyBibleContext = new OllamaFailureContext(project.Id, 0, "StoryBibleGeneration");
 
         var bible = await GenerateWithOneRepairAsync<StoryBibleResponse>(
             messages,
@@ -546,7 +837,10 @@ public sealed class StoryGenerationService : IStoryGenerationService
             progress,
             "Film omurgasi",
             cancellationToken,
-            gpuProjectId: project.Id);
+            failureContext: storyBibleContext,
+            gpuProjectId: project.Id,
+            initialGenerationSettings: initialSettings,
+            freshRetryGenerationSettings: freshSettings);
         Report(progress, "Film omurgasi", "Hikaye omurgasi alindi.", 0, project.CalculatedClipCount, 16, GenerationLogLevel.Success);
 
         for (var attempt = 1; attempt <= 2; attempt++)
@@ -569,18 +863,20 @@ public sealed class StoryGenerationService : IStoryGenerationService
                     new OllamaChatMessage("user", BuildCharacterRepairPrompt(issues))
                 })
                 .ToList();
-
-            bible = await ExecuteGpuCallAsync(
-                () => _ollamaClient.ChatStructuredAsync<StoryBibleResponse>(
-                    repairMessages,
-                    StoryJsonSchemas.StoryBibleSchema(),
-                    _options.StoryTextModel,
-                    TimeSpan.FromMinutes(Math.Max(1, _options.SceneHardTimeoutMinutes)),
-                    cancellationToken,
-                    CreateOllamaStreamProgress(progress, "Film omurgasi repair")),
-                project.Id,
-                0,
-                cancellationToken);
+            var characterRepairSettings = CreateStoryBibleGenerationSettings(project, repairMessages, profile, StoryBibleGenerationAttempt.CharacterRepair);
+            var characterRepairFreshSettings = CreateStoryBibleGenerationSettings(project, BuildFreshRetryMessages(repairMessages), profile, StoryBibleGenerationAttempt.FreshRetry);
+            bible = await GenerateWithOneRepairAsync<StoryBibleResponse>(
+                repairMessages,
+                StoryJsonSchemas.StoryBibleSchema(),
+                progress,
+                "Film omurgasi repair",
+                cancellationToken,
+                _options.StoryTextModel,
+                new OllamaFailureContext(project.Id, 0, "StoryBibleCharacterRepair"),
+                candidate => StoryCharacterFieldValidator.Validate(candidate),
+                gpuProjectId: project.Id,
+                initialGenerationSettings: characterRepairSettings,
+                freshRetryGenerationSettings: characterRepairFreshSettings);
         }
 
         StoryCharacterFieldValidator.Validate(bible);
@@ -952,9 +1248,9 @@ Validation issues:
             Characters = response.Characters,
             ContinuityFromPreviousScene = response.ContinuityFromPreviousScene,
             ImagePrompt = response.ImagePrompt,
-            ImageNegativePrompt = response.ImageNegativePrompt,
+            ImageNegativePrompt = SceneNegativePromptPolicy.SanitizeImage(response.ImageNegativePrompt),
             VideoPrompt = response.VideoPrompt,
-            VideoNegativePrompt = response.VideoNegativePrompt,
+            VideoNegativePrompt = SceneNegativePromptPolicy.SanitizeVideo(response.VideoNegativePrompt),
             NarrationText = string.Empty,
             Dialogue = dialogue,
             ValidationChecklist = response.ValidationChecklist
@@ -993,6 +1289,7 @@ Validation issues:
         int expectedDurationSeconds)
     {
         var errors = new List<string>();
+        NormalizeSingleSceneContinuity(response, expectedSceneNumber);
         if (response.SceneNumber != expectedSceneNumber) errors.Add($"sceneNumber expected {expectedSceneNumber}, actual {response.SceneNumber}");
         if (response.DurationSeconds != expectedDurationSeconds) errors.Add($"durationSeconds expected {expectedDurationSeconds}, actual {response.DurationSeconds}");
         AddRequired(response.Title, "title", errors);
@@ -1004,7 +1301,10 @@ Validation issues:
         AddRequired(response.ImageNegativePrompt, "imageNegativePrompt", errors);
         AddRequired(response.VideoPrompt, "videoPrompt", errors);
         AddRequired(response.VideoNegativePrompt, "videoNegativePrompt", errors);
-        AddRequired(response.ContinuityFromPreviousScene, "continuityFromPreviousScene", errors);
+        if (expectedSceneNumber > 1)
+        {
+            AddRequired(response.ContinuityFromPreviousScene, "continuityFromPreviousScene", errors);
+        }
         AddMaxLength(response.Title, "title", 120, errors);
         AddMaxLength(response.TimeOfDay, "timeOfDay", 120, errors);
         AddMaxLength(response.StoryBeat, "storyBeat", 900, errors);
@@ -1038,6 +1338,14 @@ Validation issues:
         if (errors.Count > 0)
         {
             throw new InvalidOperationException(string.Join(" | ", errors));
+        }
+    }
+
+    private static void NormalizeSingleSceneContinuity(SingleScenePackageResponse response, int expectedSceneNumber)
+    {
+        if (expectedSceneNumber == 1 && string.IsNullOrWhiteSpace(response.ContinuityFromPreviousScene))
+        {
+            response.ContinuityFromPreviousScene = OpeningSceneContinuityFromPreviousScene;
         }
     }
 
@@ -1291,9 +1599,9 @@ Validation issues:
         }
     }
 
-    private static void ValidateStoryBible(StoryBibleResponse bible)
+    internal static void ValidateStoryBible(StoryBibleResponse bible)
     {
-        if (string.IsNullOrWhiteSpace(bible.Title) || bible.Characters.Count == 0)
+        if (string.IsNullOrWhiteSpace(bible.Title))
         {
             throw new InvalidOperationException("Story Bible beklenen zorunlu alanlari icermiyor.");
         }
@@ -1327,9 +1635,9 @@ Validation issues:
         IReadOnlyList<StoryCharacter> characters,
         int durationSeconds)
     {
-        if (durationSeconds != 10)
+        if (durationSeconds <= 0)
         {
-            throw new InvalidOperationException("Sahne paketleri 10 saniyelik klipler icin uretilmelidir.");
+            throw new InvalidOperationException("Sahne paketleri pozitif klip suresi icin uretilmelidir.");
         }
 
         if (scenes.Count != end - start + 1)
@@ -1341,6 +1649,7 @@ Validation issues:
         var characterKeys = characters.Select(item => item.CharacterKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var scene in scenes)
         {
+            NormalizeScenePackageContinuity(scene);
             if (string.IsNullOrWhiteSpace(scene.ImagePrompt))
             {
                 throw new InvalidOperationException($"{scene.SceneNumber}. sahnenin ImagePrompt alani bos.");
@@ -1351,7 +1660,7 @@ Validation issues:
                 throw new InvalidOperationException($"{scene.SceneNumber}. sahnenin VideoPrompt alani bos.");
             }
 
-            if (string.IsNullOrWhiteSpace(scene.ContinuityFromPreviousScene))
+            if (scene.SceneNumber > 1 && string.IsNullOrWhiteSpace(scene.ContinuityFromPreviousScene))
             {
                 throw new InvalidOperationException($"{scene.SceneNumber}. sahnenin continuity alani bos.");
             }
@@ -1363,6 +1672,14 @@ Validation issues:
                     throw new InvalidOperationException($"{scene.SceneNumber}. sahnede StoryCharacter ile eslesmeyen speakerKey var.");
                 }
             }
+        }
+    }
+
+    private static void NormalizeScenePackageContinuity(ScenePackageItemResponse scene)
+    {
+        if (scene.SceneNumber == 1 && string.IsNullOrWhiteSpace(scene.ContinuityFromPreviousScene))
+        {
+            scene.ContinuityFromPreviousScene = OpeningSceneContinuityFromPreviousScene;
         }
     }
 
@@ -1429,6 +1746,8 @@ Validation issues:
         foreach (var scene in scenes)
         {
             scene.VideoPrompt = RemoveForbiddenVideoPromptSentences(scene.VideoPrompt);
+            scene.ImageNegativePrompt = SceneNegativePromptPolicy.SanitizeImage(scene.ImageNegativePrompt);
+            scene.VideoNegativePrompt = SceneNegativePromptPolicy.SanitizeVideo(scene.VideoNegativePrompt);
             if (string.IsNullOrWhiteSpace(scene.VideoPrompt))
             {
                 scene.VideoPrompt = "The characters move with clear visible body language and facial expressions while the camera moves slowly through the established composition. Preserve the exact character identities, clothing, proportions, lighting, background layout and visual continuity. No scene transition, no sudden motion, no new objects.";
@@ -1504,3 +1823,26 @@ internal sealed record StoryResumeState(
     HashSet<int> SceneNumbers,
     int TotalDurationSeconds,
     int DuplicateSceneGroups);
+
+internal enum StoryBibleOutputProfile
+{
+    Detailed,
+    BriefVisual
+}
+
+internal enum StoryBibleGenerationAttempt
+{
+    Initial,
+    FreshRetry,
+    CharacterRepair
+}
+
+internal sealed record StoryBibleOutputBudget(
+    StoryBibleOutputProfile Profile,
+    StoryBibleGenerationAttempt Attempt,
+    int NumPredict,
+    int EstimatedPromptTokens,
+    int ContextLength,
+    int ContextMarginTokens,
+    int DesiredNumPredict,
+    int CappedMaximum);

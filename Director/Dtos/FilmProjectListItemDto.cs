@@ -18,4 +18,12 @@ public sealed class FilmProjectListItemDto
     public DateTime? UpdatedAt { get; set; }
     public bool HasStory { get; set; }
     public int GeneratedSceneCount { get; set; }
+    public bool HasAutonomousGenerationRun { get; set; }
+    public AutonomousGenerationRunStatus? AutonomousGenerationStatus { get; set; }
+    public AutonomousGenerationStage? AutonomousGenerationStage { get; set; }
+    public double AutonomousGenerationProgressPercentage { get; set; }
+    public DateTime? AutonomousGenerationLastHeartbeatAtUtc { get; set; }
+    public string AutonomousGenerationStatusText => HasAutonomousGenerationRun
+        ? $"{AutonomousGenerationStatus} / {AutonomousGenerationStage} ({AutonomousGenerationProgressPercentage:0.#}%)"
+        : "-";
 }

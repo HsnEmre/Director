@@ -24,7 +24,14 @@ public sealed class OllamaOptionsValidator : IValidateOptions<OllamaOptions>
 
         ValidateRange(failures, nameof(options.ContextLength), options.ContextLength, 4096, 131072);
         ValidateRange(failures, nameof(options.SceneNumPredict), options.SceneNumPredict, 256, 32768);
+        ValidateRange(failures, nameof(options.SceneFreshRetryNumPredict), options.SceneFreshRetryNumPredict, 256, 32768);
         ValidateRange(failures, nameof(options.SceneRepairNumPredict), options.SceneRepairNumPredict, 256, 32768);
+        ValidateRange(failures, nameof(options.SceneStructuredTopK), options.SceneStructuredTopK, 1, 200);
+        ValidateRange(failures, nameof(options.SceneStructuredRepeatLastN), options.SceneStructuredRepeatLastN, 0, options.ContextLength);
+        ValidateRange(failures, nameof(options.RepetitionGuardMinCharacters), options.RepetitionGuardMinCharacters, 128, 100_000);
+        ValidateRange(failures, nameof(options.RepetitionGuardMinBlockCharacters), options.RepetitionGuardMinBlockCharacters, 16, 4096);
+        ValidateRange(failures, nameof(options.RepetitionGuardMaxBlockCharacters), options.RepetitionGuardMaxBlockCharacters, 32, 8192);
+        ValidateRange(failures, nameof(options.RepetitionGuardMinConsecutiveRepeats), options.RepetitionGuardMinConsecutiveRepeats, 2, 20);
         ValidateRange(failures, nameof(options.RequestTimeoutMinutes), options.RequestTimeoutMinutes, 1, 240);
         ValidateRange(failures, nameof(options.SceneConnectTimeoutSeconds), options.SceneConnectTimeoutSeconds, 1, 300);
         ValidateRange(failures, nameof(options.SceneFirstTokenTimeoutSeconds), options.SceneFirstTokenTimeoutSeconds, 1, 1800);
@@ -40,7 +47,19 @@ public sealed class OllamaOptionsValidator : IValidateOptions<OllamaOptions>
             failures.Add($"{nameof(options.SceneBatchSize)}={options.SceneBatchSize}; tek-sahne checkpoint akisi icin 1 olmali.");
         }
 
-        var largestOutputBudget = Math.Max(options.SceneNumPredict, options.SceneRepairNumPredict);
+        ValidateProbability(failures, nameof(options.SceneStructuredTemperature), options.SceneStructuredTemperature);
+        ValidateProbability(failures, nameof(options.SceneStructuredTopP), options.SceneStructuredTopP);
+        if (options.SceneStructuredRepeatPenalty < 1.0 || options.SceneStructuredRepeatPenalty > 2.0)
+        {
+            failures.Add($"{nameof(options.SceneStructuredRepeatPenalty)}={options.SceneStructuredRepeatPenalty}; aralik=1..2");
+        }
+
+        if (options.RepetitionGuardEnabled && options.RepetitionGuardMinBlockCharacters > options.RepetitionGuardMaxBlockCharacters)
+        {
+            failures.Add($"{nameof(options.RepetitionGuardMinBlockCharacters)}={options.RepetitionGuardMinBlockCharacters}; {nameof(options.RepetitionGuardMaxBlockCharacters)} degerinden buyuk olamaz.");
+        }
+
+        var largestOutputBudget = Math.Max(Math.Max(options.SceneNumPredict, options.SceneFreshRetryNumPredict), options.SceneRepairNumPredict);
         if (options.ContextLength <= largestOutputBudget)
         {
             failures.Add($"{nameof(options.ContextLength)}={options.ContextLength}; num_predict degerlerinden buyuk olmali. MaxNumPredict={largestOutputBudget}");
@@ -69,6 +88,14 @@ public sealed class OllamaOptionsValidator : IValidateOptions<OllamaOptions>
         if (value < minInclusive || value > maxInclusive)
         {
             failures.Add($"{optionName}={value}; aralik={minInclusive}..{maxInclusive}");
+        }
+    }
+
+    private static void ValidateProbability(List<string> failures, string optionName, double value)
+    {
+        if (value < 0 || value > 1)
+        {
+            failures.Add($"{optionName}={value}; aralik=0..1");
         }
     }
 

@@ -1,5 +1,7 @@
 using System.Net.Http;
+using System.Text.Json;
 using Director.Data;
+using Director.Dtos.Autonomous;
 using Director.Dtos.StoryGeneration;
 using Director.Ollama;
 using Director.Options;
@@ -40,18 +42,25 @@ Console.WriteLine($"Mode={(smokeOptions.Write ? "Write" : "DryRun")}");
 Console.WriteLine($"TargetProvider={databaseLabel.Provider}");
 Console.WriteLine($"TargetDatabase={databaseLabel.DatabaseName}");
 Console.WriteLine($"ProjectId={smokeOptions.ProjectId?.ToString() ?? "(not specified)"}");
+Console.WriteLine($"RunId={smokeOptions.RunId?.ToString() ?? "(not specified)"}");
 Console.WriteLine($"MaxScenes={smokeOptions.MaxScenes}");
 
 if (!smokeOptions.Write)
 {
+    if (smokeOptions.RunId is int readOnlyRunId)
+    {
+        var runSnapshot = await SmokeAutonomousRunSnapshot.LoadAsync(connectionString, readOnlyRunId);
+        runSnapshot.WriteTo(Console.Out);
+    }
+
     if (smokeOptions.ProjectId is int readOnlyProjectId)
     {
         var readOnlySnapshot = await SmokeProjectSnapshot.LoadAsync(connectionString, readOnlyProjectId);
         readOnlySnapshot.WriteTo(Console.Out);
     }
-    else
+    else if (smokeOptions.RunId is null)
     {
-        Console.WriteLine("Dry-run tamamlandi. DB write yok. Ollama cagrisi yok. Project analizi icin --project-id <id> verin.");
+        Console.WriteLine("Dry-run tamamlandi. DB write yok. Ollama cagrisi yok. Project/run analizi icin --project-id <id> veya --run-id <id> verin.");
     }
 
     return 0;
@@ -222,7 +231,7 @@ file sealed class InlineProgress<T>(Action<T> handler) : IProgress<T>
     public void Report(T value) => handler(value);
 }
 
-public sealed record StoryGenerationSmokeOptions(bool Write, int? ProjectId, int MaxScenes);
+public sealed record StoryGenerationSmokeOptions(bool Write, int? ProjectId, int MaxScenes, int? RunId = null);
 
 public sealed record StoryGenerationSmokeParseResult(
     bool Success,
@@ -247,6 +256,7 @@ public static class StoryGenerationSmokeArguments
         var write = false;
         var allowMultipleScenes = false;
         int? projectId = null;
+        int? runId = null;
         var maxScenes = 1;
 
         for (var index = 0; index < args.Count; index++)
@@ -286,6 +296,17 @@ public static class StoryGenerationSmokeArguments
                 continue;
             }
 
+            if (arg == "--run-id")
+            {
+                if (!TryReadPositiveInt(args, ref index, arg, out var parsed, out var error))
+                {
+                    return StoryGenerationSmokeParseResult.Fail(error);
+                }
+
+                runId = parsed;
+                continue;
+            }
+
             if (arg == "--max-scenes")
             {
                 if (!TryReadPositiveInt(args, ref index, arg, out var parsed, out var error))
@@ -310,13 +331,14 @@ public static class StoryGenerationSmokeArguments
             return StoryGenerationSmokeParseResult.Fail("--max-scenes 1'den buyukse --allow-multiple-scenes zorunludur.");
         }
 
-        return StoryGenerationSmokeParseResult.Ok(new StoryGenerationSmokeOptions(write, projectId, maxScenes));
+        return StoryGenerationSmokeParseResult.Ok(new StoryGenerationSmokeOptions(write, projectId, maxScenes, runId));
     }
 
     public static void WriteHelp(TextWriter writer)
     {
         writer.WriteLine("Usage:");
         writer.WriteLine("  StoryGenerationSmoke --project-id <id>");
+        writer.WriteLine("  StoryGenerationSmoke --run-id <id>");
         writer.WriteLine("  StoryGenerationSmoke --write --project-id <id> [--max-scenes 1]");
         writer.WriteLine("  StoryGenerationSmoke --write --project-id <id> --max-scenes <n> --allow-multiple-scenes");
         writer.WriteLine();
@@ -366,6 +388,86 @@ file sealed record SmokeDatabaseLabel(string Provider, string DatabaseName)
 
     private static string? ReadValue(System.Data.Common.DbConnectionStringBuilder builder, string key) =>
         builder.TryGetValue(key, out var value) ? value?.ToString() : null;
+}
+
+file sealed record SmokeAutonomousRunSnapshot(
+    int RunId,
+    int FilmProjectId,
+    string Status,
+    string CurrentStage,
+    string LastError,
+    string CorrelationId,
+    string WorkerId,
+    DateTime? LeaseExpiresAtUtc,
+    int RunCount,
+    int StoryCount,
+    int SceneCount,
+    int WorkItemCount,
+    int MediaAssetCount,
+    int SnapshotClipDurationSeconds,
+    int SnapshotCalculatedClipCount,
+    string SnapshotVideoModelType,
+    string SnapshotResolution,
+    bool SnapshotGenerateAudio,
+    bool SnapshotPreferLtxNativeDialogue)
+{
+    public static async Task<SmokeAutonomousRunSnapshot> LoadAsync(string connectionString, int runId)
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlServer(connectionString)
+            .Options;
+        await using var db = new AppDbContext(options);
+        var run = await db.AutonomousGenerationRuns.AsNoTracking().FirstOrDefaultAsync(item => item.Id == runId)
+            ?? throw new InvalidOperationException($"AutonomousGenerationRun bulunamadi. RunId={runId}");
+        var snapshot = string.IsNullOrWhiteSpace(run.ConfigurationSnapshotJson)
+            ? new AutonomousGenerationConfigurationSnapshot()
+            : JsonSerializer.Deserialize<AutonomousGenerationConfigurationSnapshot>(
+                run.ConfigurationSnapshotJson,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? new AutonomousGenerationConfigurationSnapshot();
+        return new SmokeAutonomousRunSnapshot(
+            run.Id,
+            run.FilmProjectId,
+            run.Status.ToString(),
+            run.CurrentStage.ToString(),
+            run.LastError ?? string.Empty,
+            run.CorrelationId,
+            run.WorkerId ?? string.Empty,
+            run.LeaseExpiresAtUtc,
+            await db.AutonomousGenerationRuns.AsNoTracking().CountAsync(),
+            await db.FilmStories.AsNoTracking().CountAsync(item => item.FilmProjectId == run.FilmProjectId),
+            await db.FilmScenes.AsNoTracking().CountAsync(item => item.FilmProjectId == run.FilmProjectId),
+            await db.AutonomousSceneWorkItems.AsNoTracking().CountAsync(item => item.AutonomousGenerationRunId == run.Id),
+            await db.SceneMediaAssets.AsNoTracking().CountAsync(item => item.FilmProjectId == run.FilmProjectId),
+            snapshot.ClipDurationSeconds,
+            snapshot.CalculatedClipCount,
+            snapshot.VideoModelType,
+            snapshot.Resolution,
+            snapshot.GenerateAudio,
+            snapshot.PreferLtxNativeDialogue);
+    }
+
+    public void WriteTo(TextWriter writer)
+    {
+        writer.WriteLine($"RunId={RunId}");
+        writer.WriteLine($"RunFilmProjectId={FilmProjectId}");
+        writer.WriteLine($"RunStatus={Status}");
+        writer.WriteLine($"RunCurrentStage={CurrentStage}");
+        writer.WriteLine($"RunLastError={LastError}");
+        writer.WriteLine($"RunCorrelationId={CorrelationId}");
+        writer.WriteLine($"RunWorkerId={WorkerId}");
+        writer.WriteLine($"RunLeaseExpiresAtUtc={LeaseExpiresAtUtc:O}");
+        writer.WriteLine($"AutonomousRunCount={RunCount}");
+        writer.WriteLine($"RunProjectStoryCount={StoryCount}");
+        writer.WriteLine($"RunProjectSceneCount={SceneCount}");
+        writer.WriteLine($"RunProjectWorkItemCount={WorkItemCount}");
+        writer.WriteLine($"RunProjectMediaAssetCount={MediaAssetCount}");
+        writer.WriteLine($"SnapshotClipDurationSeconds={SnapshotClipDurationSeconds}");
+        writer.WriteLine($"SnapshotCalculatedClipCount={SnapshotCalculatedClipCount}");
+        writer.WriteLine($"SnapshotVideoModelType={SnapshotVideoModelType}");
+        writer.WriteLine($"SnapshotResolution={SnapshotResolution}");
+        writer.WriteLine($"SnapshotGenerateAudio={SnapshotGenerateAudio}");
+        writer.WriteLine($"SnapshotPreferLtxNativeDialogue={SnapshotPreferLtxNativeDialogue}");
+    }
 }
 
 file sealed record SmokeProjectSnapshot(

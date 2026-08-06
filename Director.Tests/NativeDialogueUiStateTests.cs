@@ -85,7 +85,7 @@ public sealed class NativeDialogueUiStateTests
         string imagePath)
     {
         var viewModel = new ProductionWorkspaceViewModel(
-            null!, null!, null!, null!, null!, null!, null!, null!, composer, null!, videoService, null!,
+            null!, null!, null!, null!, null!, null!, null!, null!, composer, null!, videoService, new RecordingVideoRequestFactory(composer), null!,
             new AudioProductionViewModel(null!), new IdleGpuCoordinator(), activity,
             Microsoft.Extensions.Options.Options.Create(new WanGpOptions()),
             Microsoft.Extensions.Options.Options.Create(new OllamaOptions()));
@@ -188,6 +188,66 @@ public sealed class NativeDialogueUiStateTests
 
         public Task CancelActiveJobAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task SetSelectedVideoAssetAsync(int assetId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class RecordingVideoRequestFactory : IVideoGenerationRequestFactory
+    {
+        private readonly ILtxNativeDialoguePromptComposer _composer;
+
+        public RecordingVideoRequestFactory(ILtxNativeDialoguePromptComposer composer)
+        {
+            _composer = composer;
+        }
+
+        public async Task<WanGpVideoGenerationRequest> CreateAsync(
+            Director.Dtos.MediaGeneration.VideoGenerationRequestFactoryInput input,
+            CancellationToken cancellationToken = default)
+        {
+            var nativePrompt = await _composer.BuildAsync(input.Scene.Id, input.SourceImageAsset.Id, cancellationToken);
+            if (!nativePrompt.IsValid)
+            {
+                throw new NativeDialoguePromptCompositionException(
+                    input.FilmProjectId,
+                    input.Scene.Id,
+                    input.Scene.SceneNumber,
+                    NativeDialoguePromptFailureStage.ResponseValidation,
+                    string.Join(" | ", nativePrompt.Warnings),
+                    nativePrompt.DiagnosticPath);
+            }
+
+            return new WanGpVideoGenerationRequest
+            {
+                FilmProjectId = input.FilmProjectId,
+                SceneId = input.Scene.Id,
+                SceneNumber = input.Scene.SceneNumber,
+                SourceImageAssetId = input.SourceImageAsset.Id,
+                SourceImagePath = input.SourceImageAsset.FilePath,
+                ModelType = input.ModelType,
+                Prompt = nativePrompt.CombinedPrompt,
+                NegativePrompt = input.Scene.VideoNegativePrompt,
+                Resolution = input.Resolution,
+                DurationSeconds = 10,
+                InferenceSteps = input.InferenceSteps,
+                Seed = input.Seed,
+                RandomSeed = input.RandomSeed,
+                GenerationMode = VideoAudioGenerationMode.LtxNativeDialogue,
+                DialogueSourceHash = nativePrompt.DialogueSourceHash,
+                ExactSpokenLines = nativePrompt.ExactSpokenLines,
+                NativeSpeakerDisplayName = nativePrompt.SpeakerDisplayName,
+                NativeVoiceDirection = nativePrompt.VoiceDirection,
+                NativeVisualDirection = nativePrompt.VideoPrompt,
+                DialogueCount = nativePrompt.DialogueCount,
+                SpeakerCount = nativePrompt.SpeakerCount,
+                NativeDialogueCapabilitySupported = true,
+                InputContract = new WanGpVideoInputContract
+                {
+                    IsValidated = true,
+                    SupportsImageToVideo = true,
+                    SupportsStartImage = true,
+                    StartImageKey = "image_start"
+                }
+            };
+        }
     }
 
     private sealed class RecordingActivityCenter : IApplicationActivityCenter
