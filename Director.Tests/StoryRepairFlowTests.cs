@@ -33,27 +33,25 @@ public sealed class StoryRepairFlowTests
     }
 
     [Fact]
-    public async Task InitialInvalid_RepairInvalid_StopsAfterTwoCallsAndReturnsTypedSceneError()
+    public async Task InitialInvalid_RepairInvalid_FinalRegenerationSucceeds()
     {
         var client = new RepairFlowOllamaClient(repairSucceeds: false);
         var diagnostics = new RecordingDiagnosticWriter();
         var service = CreateService(client, diagnostics);
 
-        var exception = await Assert.ThrowsAsync<StorySceneGenerationException>(() =>
-            service.GenerateWithOneRepairAsync<RepairResponse>(
-                [new OllamaChatMessage("user", "scene")],
-                new { type = "object" },
-                null,
-                "Sahne 14",
-                CancellationToken.None,
-                OllamaOptions.DefaultTextModel,
-                new OllamaFailureContext(9, 14, "SingleSceneGeneration")));
+        var result = await service.GenerateWithOneRepairAsync<RepairResponse>(
+            [new OllamaChatMessage("user", "scene")],
+            new { type = "object" },
+            null,
+            "Sahne 14",
+            CancellationToken.None,
+            OllamaOptions.DefaultTextModel,
+            new OllamaFailureContext(9, 14, "SingleSceneGeneration"));
 
-        Assert.Equal(2, client.CallCount);
+        Assert.Equal("repaired", result.Value);
+        Assert.Equal(3, client.CallCount);
         Assert.Equal(new[] { "initial", "repair" }, diagnostics.Attempts);
-        Assert.Equal(9, exception.FilmProjectId);
-        Assert.Equal(14, exception.SceneNumber);
-        Assert.EndsWith("repair.json", exception.LogPath);
+        Assert.Contains("Final recovery attempt", client.Calls[2].Prompt);
     }
 
     [Fact]
@@ -82,26 +80,24 @@ public sealed class StoryRepairFlowTests
     }
 
     [Fact]
-    public async Task InitialTooLargeFailure_DoesNotAttemptRepair()
+    public async Task InitialTooLargeFailure_UsesBoundedRecovery()
     {
         var client = new RepairFlowOllamaClient(repairSucceeds: true, firstCallTooLarge: true);
         var diagnostics = new RecordingDiagnosticWriter();
         var service = CreateService(client, diagnostics);
 
-        var exception = await Assert.ThrowsAsync<StorySceneGenerationException>(() =>
-            service.GenerateWithOneRepairAsync<RepairResponse>(
-                [new OllamaChatMessage("user", "scene")],
-                new { type = "object" },
-                null,
-                "Sahne 1",
-                CancellationToken.None,
-                OllamaOptions.DefaultTextModel,
-                new OllamaFailureContext(9, 1, "SingleSceneGeneration")));
+        var result = await service.GenerateWithOneRepairAsync<RepairResponse>(
+            [new OllamaChatMessage("user", "scene")],
+            new { type = "object" },
+            null,
+            "Sahne 1",
+            CancellationToken.None,
+            OllamaOptions.DefaultTextModel,
+            new OllamaFailureContext(9, 1, "SingleSceneGeneration"));
 
-        Assert.Equal(1, client.CallCount);
+        Assert.Equal("repaired", result.Value);
+        Assert.Equal(2, client.CallCount);
         Assert.Equal(new[] { "initial" }, diagnostics.Attempts);
-        Assert.Equal(9, exception.FilmProjectId);
-        Assert.Equal(1, exception.SceneNumber);
     }
 
     [Fact]
@@ -131,25 +127,26 @@ public sealed class StoryRepairFlowTests
     }
 
     [Fact]
-    public async Task InitialTokenLimitFreshTokenLimit_StopsAfterTwoCallsAndUsesNoRepair()
+    public async Task InitialTokenLimitFreshTokenLimit_UsesFinalRegenerationWithoutRawEcho()
     {
         var client = new RepairFlowOllamaClient(repairSucceeds: false, firstCallTokenLimit: true, secondCallTokenLimit: true);
         var diagnostics = new RecordingDiagnosticWriter();
         var service = CreateService(client, diagnostics);
 
-        var exception = await Assert.ThrowsAsync<StorySceneGenerationException>(() =>
-            service.GenerateWithOneRepairAsync<RepairResponse>(
-                [new OllamaChatMessage("user", "scene")],
-                new { type = "object" },
-                null,
-                "Sahne 25",
-                CancellationToken.None,
-                OllamaOptions.DefaultTextModel,
-                new OllamaFailureContext(9, 25, "SingleSceneGeneration")));
+        var result = await service.GenerateWithOneRepairAsync<RepairResponse>(
+            [new OllamaChatMessage("user", "scene")],
+            new { type = "object" },
+            null,
+            "Sahne 25",
+            CancellationToken.None,
+            OllamaOptions.DefaultTextModel,
+            new OllamaFailureContext(9, 25, "SingleSceneGeneration"));
 
-        Assert.Equal(2, client.CallCount);
+        Assert.Equal("repaired", result.Value);
+        Assert.Equal(3, client.CallCount);
         Assert.Equal(new[] { "initial", "fresh" }, diagnostics.Attempts);
-        Assert.Equal("TokenLimit", exception.Stage);
+        Assert.Contains("Final recovery attempt", client.Calls[2].Prompt);
+        Assert.DoesNotContain(RepairFlowOllamaClient.TruncatedRawMarker, client.Calls[2].Prompt);
         Assert.DoesNotContain("qwen3:4b", client.Models);
     }
 
@@ -175,24 +172,74 @@ public sealed class StoryRepairFlowTests
     }
 
     [Fact]
-    public async Task DiagnosticWriterFailure_DoesNotMaskOriginalModelFailure()
+    public async Task AllRecoveryAttemptsFail_WithoutFallback_ReturnsTypedSceneError()
     {
-        var client = new RepairFlowOllamaClient(repairSucceeds: true, firstCallTooLarge: true);
-        var service = CreateService(client, new ThrowingDiagnosticWriter());
+        var client = new RepairFlowOllamaClient(repairSucceeds: false, failAllCalls: true);
+        var diagnostics = new RecordingDiagnosticWriter();
+        var service = CreateService(client, diagnostics);
 
         var exception = await Assert.ThrowsAsync<StorySceneGenerationException>(() =>
             service.GenerateWithOneRepairAsync<RepairResponse>(
                 [new OllamaChatMessage("user", "scene")],
                 new { type = "object" },
                 null,
-                "Sahne 1",
+                "Sahne 5",
                 CancellationToken.None,
                 OllamaOptions.DefaultTextModel,
-                new OllamaFailureContext(9, 1, "SingleSceneGeneration")));
+                new OllamaFailureContext(17, 5, "SceneVideoPromptGeneration")));
 
-        Assert.Equal("ResponseTooLarge", exception.Stage);
-        Assert.Equal(string.Empty, exception.LogPath);
-        Assert.Equal(1, client.CallCount);
+        Assert.Equal(3, client.CallCount);
+        Assert.Equal(new[] { "initial", "repair", "final-regeneration" }, diagnostics.Attempts);
+        Assert.Equal(17, exception.FilmProjectId);
+        Assert.Equal(5, exception.SceneNumber);
+    }
+
+    [Fact]
+    public async Task AllRecoveryAttemptsFail_WithFallback_ReturnsFallback()
+    {
+        var client = new RepairFlowOllamaClient(repairSucceeds: false, failAllCalls: true);
+        var diagnostics = new RecordingDiagnosticWriter();
+        var service = CreateService(client, diagnostics);
+
+        var result = await service.GenerateWithOneRepairAsync<RepairResponse>(
+            [new OllamaChatMessage("user", "scene")],
+            new { type = "object" },
+            null,
+            "Sahne 5",
+            CancellationToken.None,
+            OllamaOptions.DefaultTextModel,
+            new OllamaFailureContext(17, 5, "SceneVideoPromptGeneration"),
+            value =>
+            {
+                if (string.IsNullOrWhiteSpace(value.Value))
+                {
+                    throw new InvalidOperationException("empty fallback");
+                }
+            },
+            deterministicFallback: () => new RepairResponse { Value = "fallback" });
+
+        Assert.Equal("fallback", result.Value);
+        Assert.Equal(3, client.CallCount);
+        Assert.Equal(new[] { "initial", "repair", "final-regeneration" }, diagnostics.Attempts);
+    }
+
+    [Fact]
+    public async Task DiagnosticWriterFailure_DoesNotMaskRecovery()
+    {
+        var client = new RepairFlowOllamaClient(repairSucceeds: true, firstCallTooLarge: true);
+        var service = CreateService(client, new ThrowingDiagnosticWriter());
+
+        var result = await service.GenerateWithOneRepairAsync<RepairResponse>(
+            [new OllamaChatMessage("user", "scene")],
+            new { type = "object" },
+            null,
+            "Sahne 1",
+            CancellationToken.None,
+            OllamaOptions.DefaultTextModel,
+            new OllamaFailureContext(9, 1, "SingleSceneGeneration"));
+
+        Assert.Equal("repaired", result.Value);
+        Assert.Equal(2, client.CallCount);
     }
 
     [Fact]
@@ -264,7 +311,8 @@ public sealed class StoryRepairFlowTests
         bool firstCallTooLarge = false,
         bool firstCallTokenLimit = false,
         bool secondCallTokenLimit = false,
-        bool firstCallRepetition = false) : IOllamaClient
+        bool firstCallRepetition = false,
+        bool failAllCalls = false) : IOllamaClient
     {
         public const string TruncatedRawMarker = "SCENE25_RAW_REPEAT_MARKER";
         public int CallCount { get; private set; }
@@ -309,14 +357,14 @@ public sealed class StoryRepairFlowTests
                 StreamCompleted = true,
                 DoneReason = "stop"
             };
-            if ((CallCount == 1 && !firstCallReturnsValue) || (CallCount > 1 && !repairSucceeds))
+            if (failAllCalls || (CallCount == 1 && !firstCallReturnsValue) || (CallCount == 2 && !repairSucceeds))
             {
                 if (CallCount == 1 && firstCallTooLarge)
                 {
                     throw new OllamaResponseTooLargeException("too large", "{large", metadata);
                 }
 
-                if ((CallCount == 1 && firstCallTokenLimit) || (CallCount > 1 && secondCallTokenLimit))
+                if ((CallCount == 1 && firstCallTokenLimit) || (CallCount == 2 && secondCallTokenLimit))
                 {
                     metadata.DoneReason = "length";
                     metadata.ResponseTokenCount = 6144;

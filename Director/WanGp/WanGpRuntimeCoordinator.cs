@@ -50,7 +50,7 @@ public sealed class WanGpRuntimeCoordinator : IWanGpRuntimeCoordinator
 
     public async Task<WanGpRuntimeStatus> RefreshStatusAsync(CancellationToken cancellationToken = default)
     {
-        var guiOpen = await IsPortOpenAsync(7860, cancellationToken);
+        var guiOpen = await IsPortOpenAsync(_options.GetEffectiveGuiPort(), cancellationToken);
         var connection = await _client.TestConnectionAsync(cancellationToken);
         var status = new WanGpRuntimeStatus
         {
@@ -85,7 +85,7 @@ public sealed class WanGpRuntimeCoordinator : IWanGpRuntimeCoordinator
             {
                 return SetStatus(new WanGpRuntimeStatus
                 {
-                    GuiState = await IsPortOpenAsync(7860, cancellationToken) ? WanGpGuiState.Open : WanGpGuiState.Closed,
+                    GuiState = await IsPortOpenAsync(_options.GetEffectiveGuiPort(), cancellationToken) ? WanGpGuiState.Open : WanGpGuiState.Closed,
                     McpState = WanGpMcpConnectionState.InvalidConfiguration,
                     Message = validationMessage
                 });
@@ -98,10 +98,16 @@ public sealed class WanGpRuntimeCoordinator : IWanGpRuntimeCoordinator
                 return SetStatus(existing);
             }
 
-            var guiOpen = await IsPortOpenAsync(7860, cancellationToken);
+            var guiOpen = await IsPortOpenAsync(_options.GetEffectiveGuiPort(), cancellationToken);
             var mcpPortOpen = await IsPortOpenAsync(_options.Port, cancellationToken);
             if (mcpPortOpen)
             {
+                var retried = await WaitForOpenPortHandshakeAsync(cancellationToken);
+                if (retried.IsReady)
+                {
+                    return SetStatus(retried);
+                }
+
                 return SetStatus(new WanGpRuntimeStatus
                 {
                     GuiState = guiOpen ? WanGpGuiState.Open : WanGpGuiState.Closed,
@@ -155,6 +161,39 @@ public sealed class WanGpRuntimeCoordinator : IWanGpRuntimeCoordinator
         }
     }
 
+    private async Task<WanGpRuntimeStatus> WaitForOpenPortHandshakeAsync(CancellationToken cancellationToken)
+    {
+        var retryWindow = _options.McpHandshakeRetryWindow;
+        if (retryWindow <= TimeSpan.Zero)
+        {
+            return await ValidateHandshakeAsync(cancellationToken);
+        }
+
+        var deadline = DateTime.UtcNow.Add(retryWindow);
+        WanGpRuntimeStatus last = LastStatus;
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _activity.AddLog("WanGP", "MCP portu acik; handshake yeniden deneniyor.");
+            last = await ValidateHandshakeAsync(cancellationToken);
+            if (last.IsReady)
+            {
+                return last;
+            }
+
+            var remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            var delay = remaining < _options.McpHandshakeRetryInterval ? remaining : _options.McpHandshakeRetryInterval;
+            await Task.Delay(delay, cancellationToken);
+        }
+
+        return last;
+    }
+
     public Task StopOwnedProcessAsync(CancellationToken cancellationToken = default)
     {
         if (_ownedProcess is { HasExited: false })
@@ -168,7 +207,7 @@ public sealed class WanGpRuntimeCoordinator : IWanGpRuntimeCoordinator
 
     private async Task<WanGpRuntimeStatus> ValidateHandshakeAsync(CancellationToken cancellationToken)
     {
-        var guiOpen = await IsPortOpenAsync(7860, cancellationToken);
+        var guiOpen = await IsPortOpenAsync(_options.GetEffectiveGuiPort(), cancellationToken);
         var connection = await _client.TestConnectionAsync(cancellationToken);
         if (!connection.IsAvailable)
         {
@@ -211,7 +250,7 @@ public sealed class WanGpRuntimeCoordinator : IWanGpRuntimeCoordinator
         var startInfo = new ProcessStartInfo
         {
             FileName = _options.PythonExecutablePath,
-            Arguments = $"wgp.py --mcp --mcp-transport streamable-http --mcp-host {_options.Host} --mcp-port {_options.Port}",
+            Arguments = BuildMcpArguments(_options),
             WorkingDirectory = _options.RootPath,
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -228,6 +267,9 @@ public sealed class WanGpRuntimeCoordinator : IWanGpRuntimeCoordinator
         _ownedProcess.BeginErrorReadLine();
         _activity.AddLog("WanGP", $"MCP sidecar başlatıldı. PID: {_ownedProcess.Id}");
     }
+
+    internal static string BuildMcpArguments(WanGpOptions options) =>
+        $"wgp.py --mcp --mcp-transport streamable-http --mcp-host {options.Host} --mcp-port {options.Port}";
 
     private void LogProcessLine(string phase, string? line, GenerationLogLevel level)
     {

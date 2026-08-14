@@ -6,7 +6,7 @@ namespace Director.Options;
 public sealed class WanGpOptions
 {
     public bool Enabled { get; set; } = true;
-    public string Endpoint { get; set; } = "http://127.0.0.1:7866/mcp";
+    public string Endpoint { get; set; } = "http://127.0.0.1:7866/mcp/";
     public string GuiUrl { get; set; } = "http://127.0.0.1:7860";
     public string RootPath { get; set; } = string.Empty;
     public string PythonExecutablePath { get; set; } = "python";
@@ -16,8 +16,34 @@ public sealed class WanGpOptions
     public int Port { get; set; } = 7866;
     public int PollingIntervalMilliseconds { get; set; } = 750;
     public int StartupTimeoutSeconds { get; set; } = 180;
+    public int McpHandshakeRetrySeconds { get; set; } = 60;
+    public int McpHandshakeRetryIntervalMilliseconds { get; set; } = 1000;
     public int GenerationTimeoutMinutes { get; set; } = 45;
     public string OutputRootPath { get; set; } = string.Empty;
+
+    public Uri GetEffectiveMcpEndpoint()
+    {
+        var builder = new UriBuilder(Uri.UriSchemeHttp, Host, Port, "mcp");
+        if (!builder.Path.EndsWith("/", StringComparison.Ordinal))
+        {
+            builder.Path += "/";
+        }
+
+        return builder.Uri;
+    }
+
+    public string GetEffectiveMcpEndpointText() => GetEffectiveMcpEndpoint().ToString();
+
+    public TimeSpan McpHandshakeRetryWindow => TimeSpan.FromSeconds(Math.Max(0, McpHandshakeRetrySeconds));
+
+    public TimeSpan McpHandshakeRetryInterval => TimeSpan.FromMilliseconds(Math.Max(100, McpHandshakeRetryIntervalMilliseconds));
+
+    public int GetEffectiveGuiPort()
+    {
+        return Uri.TryCreate(GuiUrl, UriKind.Absolute, out var guiUri) && !guiUri.IsDefaultPort
+            ? guiUri.Port
+            : 7860;
+    }
 
     public string GetEffectiveOutputRootPath()
     {
@@ -49,11 +75,17 @@ public sealed class WanGpOptionsValidator : IValidateOptions<WanGpOptions>
 {
     public ValidateOptionsResult Validate(string? name, WanGpOptions options)
     {
-        if (!Uri.TryCreate(options.Endpoint, UriKind.Absolute, out var endpoint) ||
-            endpoint.Scheme != Uri.UriSchemeHttp ||
-            !endpoint.IsLoopback)
+        if (!Uri.TryCreate(options.Endpoint, UriKind.Absolute, out var configuredEndpoint) ||
+            configuredEndpoint.Scheme != Uri.UriSchemeHttp ||
+            !configuredEndpoint.IsLoopback)
         {
             return ValidateOptionsResult.Fail("WanGp:Endpoint must be a localhost HTTP URI.");
+        }
+
+        var effectiveEndpoint = options.GetEffectiveMcpEndpoint();
+        if (Canonicalize(configuredEndpoint) != Canonicalize(effectiveEndpoint))
+        {
+            return ValidateOptionsResult.Fail("WanGp:Endpoint must match WanGp:Host and WanGp:Port.");
         }
 
         if (!Uri.TryCreate(options.GuiUrl, UriKind.Absolute, out var guiUri) ||
@@ -120,5 +152,16 @@ public sealed class WanGpOptionsValidator : IValidateOptions<WanGpOptions>
         }
 
         return ValidateOptionsResult.Success;
+    }
+
+    private static string Canonicalize(Uri uri)
+    {
+        var builder = new UriBuilder(uri);
+        if (!builder.Path.EndsWith("/", StringComparison.Ordinal))
+        {
+            builder.Path += "/";
+        }
+
+        return builder.Uri.ToString();
     }
 }

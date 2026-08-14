@@ -9,5 +9,5 @@ public interface INavigationService
     Task NavigateToProjectSetupAsync(int? projectId = null);
     Task NavigateToStoryGenerationAsync(int projectId);
     Task NavigateToProjectHistoryAsync();
-    Task NavigateToProductionAsync(int projectId);
+    Task NavigateToProductionAsync(int projectId, int selectedTabIndex = 0);
 }

@@ -17,9 +17,14 @@ public sealed class AutonomousGenerationRunService : IAutonomousGenerationRunSer
     [
         AutonomousGenerationRunStatus.Pending,
         AutonomousGenerationRunStatus.Validating,
+        AutonomousGenerationRunStatus.GeneratingStoryNarrative,
+        AutonomousGenerationRunStatus.GeneratingCharacters,
+        AutonomousGenerationRunStatus.GeneratingNarrativeScenes,
+        AutonomousGenerationRunStatus.GeneratingImagePrompts,
         AutonomousGenerationRunStatus.GeneratingStory,
         AutonomousGenerationRunStatus.GeneratingScenes,
         AutonomousGenerationRunStatus.GeneratingImages,
+        AutonomousGenerationRunStatus.GeneratingVideoPrompts,
         AutonomousGenerationRunStatus.GeneratingVideos,
         AutonomousGenerationRunStatus.GeneratingAudio,
         AutonomousGenerationRunStatus.Finalizing,
@@ -114,6 +119,69 @@ public sealed class AutonomousGenerationRunService : IAutonomousGenerationRunSer
             .FirstOrDefaultAsync(cancellationToken);
 
         return run is null ? null : ToSummary(run);
+    }
+
+    public async Task<AutonomousProjectCheckpoint> GetProjectCheckpointAsync(int filmProjectId, CancellationToken cancellationToken = default)
+    {
+        await using var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var project = await dbContext.FilmProjects
+            .AsNoTracking()
+            .Include(item => item.Story)
+                .ThenInclude(story => story!.Characters)
+            .FirstOrDefaultAsync(item => item.Id == filmProjectId, cancellationToken)
+            ?? throw new InvalidOperationException("Film projesi bulunamadı.");
+
+        var scenes = await dbContext.FilmScenes
+            .AsNoTracking()
+            .Where(scene => scene.FilmProjectId == filmProjectId)
+            .OrderBy(scene => scene.SceneNumber)
+            .ToListAsync(cancellationToken);
+
+        var sceneIds = scenes.Select(scene => scene.Id).ToHashSet();
+        var assets = await dbContext.SceneMediaAssets
+            .AsNoTracking()
+            .Where(asset => asset.FilmProjectId == filmProjectId && sceneIds.Contains(asset.SceneId))
+            .OrderByDescending(asset => asset.IsSelected)
+            .ThenByDescending(asset => asset.CreatedAt)
+            .ToListAsync(cancellationToken);
+
+        var expectedSceneCount = Math.Max(project.CalculatedClipCount, scenes.Count);
+        var sceneNumbers = scenes.Select(scene => scene.SceneNumber).ToHashSet();
+        var firstMissingNarrativeScene = Enumerable.Range(1, expectedSceneCount)
+            .FirstOrDefault(sceneNumber => !sceneNumbers.Contains(sceneNumber));
+
+        return new AutonomousProjectCheckpoint
+        {
+            FilmProjectId = filmProjectId,
+            ExpectedSceneCount = expectedSceneCount,
+            SceneCount = scenes.Count,
+            HasValidStory = HasValidStory(project.Story),
+            HasValidCharacters = HasValidCharacters(project.Story),
+            FirstMissingNarrativeSceneNumber = firstMissingNarrativeScene > 0 ? firstMissingNarrativeScene : null,
+            FirstMissingImagePromptSceneNumber = scenes
+                .Where(scene => string.IsNullOrWhiteSpace(scene.ImagePrompt) || string.IsNullOrWhiteSpace(scene.ImageNegativePrompt))
+                .Select(scene => (int?)scene.SceneNumber)
+                .FirstOrDefault(),
+            FirstMissingVideoPromptSceneNumber = scenes
+                .Where(scene =>
+                    string.IsNullOrWhiteSpace(scene.VideoPrompt) ||
+                    string.IsNullOrWhiteSpace(scene.VideoNegativePrompt) ||
+                    StoryGenerationService.HasInvalidSilentVideoPromptFields(scene.VideoPrompt, scene.VideoNegativePrompt))
+                .Select(scene => (int?)scene.SceneNumber)
+                .FirstOrDefault(),
+            FirstMissingSelectedImageSceneNumber = scenes
+                .Where(scene => FindValidAsset(assets, scene.Id, MediaType.Image, null, selectedOnly: true) is null)
+                .Select(scene => (int?)scene.SceneNumber)
+                .FirstOrDefault(),
+            FirstMissingSelectedVideoSceneNumber = scenes
+                .Where(scene => FindValidAsset(assets, scene.Id, MediaType.Video, null, selectedOnly: true) is null)
+                .Select(scene => (int?)scene.SceneNumber)
+                .FirstOrDefault(),
+            FirstMissingSceneAudioSceneNumber = scenes
+                .Where(scene => FindValidAsset(assets, scene.Id, MediaType.Audio, MediaAssetRole.SceneSpeechTrack, selectedOnly: false) is null)
+                .Select(scene => (int?)scene.SceneNumber)
+                .FirstOrDefault()
+        };
     }
 
     public async Task<IReadOnlyList<AutonomousGenerationRunSummary>> GetRunnableRunsAsync(CancellationToken cancellationToken = default)
@@ -261,6 +329,49 @@ public sealed class AutonomousGenerationRunService : IAutonomousGenerationRunSer
             });
         }
 
+        await dbContext.SaveChangesAsync(cancellationToken);
+        existing = await dbContext.AutonomousSceneWorkItems
+            .Where(item => item.AutonomousGenerationRunId == runId)
+            .ToListAsync(cancellationToken);
+
+        var sceneIds = scenes.Select(scene => scene.Id).ToHashSet();
+        var assets = await dbContext.SceneMediaAssets
+            .AsNoTracking()
+            .Where(asset => asset.FilmProjectId == run.FilmProjectId && sceneIds.Contains(asset.SceneId))
+            .OrderByDescending(asset => asset.IsSelected)
+            .ThenByDescending(asset => asset.CreatedAt)
+            .ToListAsync(cancellationToken);
+
+        foreach (var item in existing)
+        {
+            var selectedImage = FindValidAsset(assets, item.StorySceneId, MediaType.Image, null, selectedOnly: true);
+            if (selectedImage is not null)
+            {
+                item.ImageStatus = AutonomousWorkItemStatus.Completed;
+                item.ImageMediaAssetId = selectedImage.Id;
+                item.LastError = string.Empty;
+                item.UpdatedAtUtc = now;
+            }
+
+            var selectedVideo = FindValidAsset(assets, item.StorySceneId, MediaType.Video, null, selectedOnly: true);
+            if (selectedVideo is not null)
+            {
+                item.VideoStatus = AutonomousWorkItemStatus.Completed;
+                item.VideoMediaAssetId = selectedVideo.Id;
+                item.LastError = string.Empty;
+                item.UpdatedAtUtc = now;
+            }
+
+            var sceneAudio = FindValidAsset(assets, item.StorySceneId, MediaType.Audio, MediaAssetRole.SceneSpeechTrack, selectedOnly: false);
+            if (sceneAudio is not null)
+            {
+                item.AudioStatus = AutonomousWorkItemStatus.Completed;
+                item.AudioMediaAssetId = sceneAudio.Id;
+                item.LastError = string.Empty;
+                item.UpdatedAtUtc = now;
+            }
+        }
+
         run.TotalSceneCount = scenes.Count;
         run.CompletedSceneCount = existing.Count(IsSceneWorkItemCompleted);
         run.UpdatedAtUtc = now;
@@ -281,6 +392,20 @@ public sealed class AutonomousGenerationRunService : IAutonomousGenerationRunSer
 
     public Task<SceneMediaAsset?> FindValidSceneAudioAssetAsync(int sceneId, CancellationToken cancellationToken = default) =>
         FindValidAssetAsync(sceneId, MediaType.Audio, MediaAssetRole.SceneSpeechTrack, selectedOnly: false, cancellationToken);
+
+    public async Task<bool> HasActiveGenerationJobAsync(int sceneId, MediaType mediaType, CancellationToken cancellationToken = default)
+    {
+        await using var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        return await dbContext.GenerationJobs
+            .AsNoTracking()
+            .AnyAsync(job =>
+                job.SceneId == sceneId &&
+                job.MediaType == mediaType &&
+                (job.Status == GenerationJobStatus.Pending ||
+                 job.Status == GenerationJobStatus.Queued ||
+                 job.Status == GenerationJobStatus.Running),
+                cancellationToken);
+    }
 
     public async Task<IReadOnlyList<SceneSpeechSegment>> GetSpeechSegmentsAsync(int sceneId, CancellationToken cancellationToken = default)
     {
@@ -475,7 +600,6 @@ public sealed class AutonomousGenerationRunService : IAutonomousGenerationRunSer
             return;
         }
 
-        run.Status = AutonomousGenerationRunStatus.Pending;
         run.CurrentStage = AutonomousGenerationStage.Pending;
         run.WorkerId = null;
         run.LeaseExpiresAtUtc = null;
@@ -488,26 +612,21 @@ public sealed class AutonomousGenerationRunService : IAutonomousGenerationRunSer
     {
         await using var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
         var run = await RequireRunAsync(dbContext, runId, cancellationToken);
-        if (run.Status != AutonomousGenerationRunStatus.Failed)
+        if (run.Status is not (AutonomousGenerationRunStatus.Failed or AutonomousGenerationRunStatus.Cancelled))
         {
             return;
         }
 
         var snapshot = DeserializeSnapshot(run);
         EnsureSnapshotVideoDurationCompatible(snapshot);
+        var filmProjectId = run.FilmProjectId;
+        await StartOrGetActiveRunAsync(filmProjectId, snapshot, cancellationToken);
+        return;
 
-        run.Status = AutonomousGenerationRunStatus.Pending;
-        run.CurrentStage = AutonomousGenerationStage.Pending;
-        run.CompletedAtUtc = null;
-        run.CancellationRequested = false;
-        run.AttemptCount++;
-        run.WorkerId = null;
-        run.LeaseExpiresAtUtc = null;
-        run.LastError = string.Empty;
-        run.LastMessage = "Başarısız otonom üretim retry için kuyruğa alındı.";
-        run.UpdatedAtUtc = DateTime.UtcNow;
-        await dbContext.SaveChangesAsync(cancellationToken);
     }
+
+    public Task<SceneMediaAsset?> FindValidImageAssetAsync(int sceneId, CancellationToken cancellationToken = default) =>
+        FindValidAssetAsync(sceneId, MediaType.Image, null, false, cancellationToken);
 
     private async Task<SceneMediaAsset?> FindValidAssetAsync(
         int sceneId,
@@ -587,6 +706,42 @@ public sealed class AutonomousGenerationRunService : IAutonomousGenerationRunSer
 
     private static bool IsWorkItemTerminalSuccess(AutonomousWorkItemStatus status) =>
         status is AutonomousWorkItemStatus.Completed or AutonomousWorkItemStatus.Skipped;
+
+    private static bool HasValidStory(FilmStory? story) =>
+        story is not null &&
+        !string.IsNullOrWhiteSpace(story.Title) &&
+        !string.IsNullOrWhiteSpace(story.Synopsis);
+
+    private static bool HasValidCharacters(FilmStory? story) =>
+        story?.Characters.Any(character =>
+            !string.IsNullOrWhiteSpace(character.CharacterKey) &&
+            !string.IsNullOrWhiteSpace(character.Name) &&
+            !string.IsNullOrWhiteSpace(character.PhysicalDescription) &&
+            !string.IsNullOrWhiteSpace(character.ContinuityDescription)) == true;
+
+    private static SceneMediaAsset? FindValidAsset(
+        IEnumerable<SceneMediaAsset> assets,
+        int sceneId,
+        MediaType mediaType,
+        MediaAssetRole? role,
+        bool selectedOnly)
+    {
+        var query = assets.Where(asset => asset.SceneId == sceneId && asset.MediaType == mediaType);
+        if (role is not null)
+        {
+            query = query.Where(asset => asset.Role == role);
+        }
+
+        if (selectedOnly)
+        {
+            query = query.Where(asset => asset.IsSelected);
+        }
+
+        return query.FirstOrDefault(asset =>
+            !string.IsNullOrWhiteSpace(asset.FilePath) &&
+            File.Exists(asset.FilePath) &&
+            new FileInfo(asset.FilePath).Length > 0);
+    }
 
     private static async Task<AutonomousGenerationRun> RequireRunAsync(AppDbContext dbContext, int runId, CancellationToken cancellationToken) =>
         await dbContext.AutonomousGenerationRuns.FirstOrDefaultAsync(run => run.Id == runId, cancellationToken)

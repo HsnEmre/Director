@@ -1,6 +1,10 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json.Nodes;
 using Director.Enums;
 using Director.Options;
+using Director.Services;
+using Director.Services.Interfaces;
 using Director.WanGp;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -15,6 +19,84 @@ public sealed class WanGpStableMcpClientTests
         var endpoint = WanGpStableMcpClient.CanonicalizeEndpoint("http://127.0.0.1:7866/mcp");
 
         Assert.Equal("http://127.0.0.1:7866/mcp/", endpoint.ToString());
+    }
+
+    [Fact]
+    public void WanGpEndpoint_DriftFromRuntimePort_IsRejected()
+    {
+        var result = new WanGpOptionsValidator().Validate(
+            null,
+            new WanGpOptions
+            {
+                Endpoint = "http://127.0.0.1:8000/mcp",
+                Host = "127.0.0.1",
+                Port = 7866
+            });
+
+        Assert.True(result.Failed);
+        Assert.Contains("WanGp:Endpoint must match WanGp:Host and WanGp:Port", result.FailureMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RuntimeCoordinatorSidecarEndpoint_MatchesStableClientEndpoint()
+    {
+        var options = new WanGpOptions
+        {
+            Endpoint = "http://127.0.0.1:7866/mcp/",
+            Host = "127.0.0.1",
+            Port = 7866
+        };
+        var factory = new FakeSessionFactory(_ => new FakeSession());
+        var client = CreateClient(factory, options);
+
+        _ = await client.TestConnectionAsync();
+
+        var launchedEndpoint = $"http://{options.Host}:{options.Port}/mcp/";
+        Assert.Equal(launchedEndpoint, factory.Endpoints.Single().ToString());
+        Assert.Contains("--mcp-host 127.0.0.1", WanGpRuntimeCoordinator.BuildMcpArguments(options), StringComparison.Ordinal);
+        Assert.Contains("--mcp-port 7866", WanGpRuntimeCoordinator.BuildMcpArguments(options), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RuntimeCoordinator_PortOpenWithTransientHandshakeFailure_RetriesBeforePortConflict()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var root = Path.Combine(Path.GetTempPath(), "DirectorWanGpRuntimeTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        File.WriteAllText(Path.Combine(root, "wgp.py"), "# test");
+        try
+        {
+            var options = new WanGpOptions
+            {
+                Endpoint = $"http://127.0.0.1:{port}/mcp/",
+                Host = "127.0.0.1",
+                Port = port,
+                RootPath = root,
+                PythonExecutablePath = Environment.ProcessPath ?? typeof(object).Assembly.Location,
+                AutoStart = false,
+                McpHandshakeRetrySeconds = 2,
+                McpHandshakeRetryIntervalMilliseconds = 100
+            };
+            var client = new FlakyHandshakeWanGpClient(failuresBeforeReady: 1);
+            var coordinator = new WanGpRuntimeCoordinator(
+                client,
+                Microsoft.Extensions.Options.Options.Create(options),
+                new ApplicationActivityCenter(),
+                NullLogger<WanGpRuntimeCoordinator>.Instance);
+
+            var status = await coordinator.EnsureReadyAsync();
+
+            Assert.True(status.IsReady);
+            Assert.Equal(WanGpMcpConnectionState.Connected, status.McpState);
+            Assert.True(client.TestConnectionCallCount >= 2);
+        }
+        finally
+        {
+            listener.Stop();
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -133,8 +215,11 @@ public sealed class WanGpStableMcpClientTests
     }
 
     private static WanGpStableMcpClient CreateClient(FakeSessionFactory factory) =>
+        CreateClient(factory, new WanGpOptions { Endpoint = "http://127.0.0.1:7866/mcp/" });
+
+    private static WanGpStableMcpClient CreateClient(FakeSessionFactory factory, WanGpOptions options) =>
         new(
-            Microsoft.Extensions.Options.Options.Create(new WanGpOptions { Endpoint = "http://127.0.0.1:7866/mcp" }),
+            Microsoft.Extensions.Options.Options.Create(options),
             NullLoggerFactory.Instance,
             NullLogger<WanGpStableMcpClient>.Instance,
             factory.CreateAsync);
@@ -152,14 +237,66 @@ public sealed class WanGpStableMcpClientTests
         "wangp_cancel_job"
     ];
 
+    private sealed class FlakyHandshakeWanGpClient(int failuresBeforeReady) : IWanGpClient
+    {
+        public int TestConnectionCallCount { get; private set; }
+
+        public Task<WanGpConnectionResult> TestConnectionAsync(CancellationToken cancellationToken = default)
+        {
+            TestConnectionCallCount++;
+            return Task.FromResult(TestConnectionCallCount <= failuresBeforeReady
+                ? new WanGpConnectionResult { IsAvailable = false, Message = "transient handshake failure" }
+                : new WanGpConnectionResult { IsAvailable = true, Message = "ready" });
+        }
+
+        public Task<IReadOnlyList<string>> ListToolsAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(RequiredTools());
+
+        public Task<IReadOnlyList<WanGpModelInfo>> GetAvailableImageModelsAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<WanGpModelInfo>>([]);
+
+        public Task<IReadOnlyList<WanGpModelInfo>> GetAvailableImageToVideoModelsAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<WanGpModelInfo>>([]);
+
+        public Task<IReadOnlyList<WanGpModelInfo>> GetAvailableAudioModelsAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<WanGpModelInfo>>([]);
+
+        public Task<WanGpModelSchema?> GetModelSchemaAsync(string modelType, CancellationToken cancellationToken = default) =>
+            Task.FromResult<WanGpModelSchema?>(null);
+
+        public Task<WanGpGenerationSubmission> SubmitImageGenerationAsync(
+            WanGpImageGenerationRequest request,
+            WanGpModelSchema schema,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<WanGpGenerationSubmission> SubmitVideoGenerationAsync(
+            IReadOnlyDictionary<string, object?> source,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<WanGpGenerationSubmission> SubmitAudioGenerationAsync(
+            IReadOnlyDictionary<string, object?> source,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<WanGpJobSnapshot> GetJobAsync(string externalJobId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task CancelJobAsync(string externalJobId, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+    }
+
     private sealed class FakeSessionFactory(Func<int, FakeSession> create)
     {
         public int CreateCount { get; private set; }
         public List<FakeSession> Sessions { get; } = [];
+        public List<Uri> Endpoints { get; } = [];
 
         public Task<IWanGpMcpSession> CreateAsync(Uri endpoint, CancellationToken cancellationToken)
         {
             Assert.EndsWith("/mcp/", endpoint.ToString());
+            Endpoints.Add(endpoint);
             var session = create(CreateCount);
             CreateCount++;
             Sessions.Add(session);

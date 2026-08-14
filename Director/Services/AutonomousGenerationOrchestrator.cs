@@ -21,6 +21,7 @@ public sealed class AutonomousGenerationOrchestrator : IAutonomousGenerationOrch
     private readonly IAudioGenerationService _audioGenerationService;
     private readonly IVideoGenerationRequestFactory _videoGenerationRequestFactory;
     private readonly IFinalMovieAssemblyService _finalMovieAssemblyService;
+    private readonly IWanGpRuntimeCoordinator _wanGpRuntimeCoordinator;
     private readonly AutonomousGenerationRetryPolicy _retryPolicy;
     private readonly AutonomousGenerationOptions _options;
     private readonly ILogger<AutonomousGenerationOrchestrator> _logger;
@@ -33,6 +34,7 @@ public sealed class AutonomousGenerationOrchestrator : IAutonomousGenerationOrch
         IAudioGenerationService audioGenerationService,
         IVideoGenerationRequestFactory videoGenerationRequestFactory,
         IFinalMovieAssemblyService finalMovieAssemblyService,
+        IWanGpRuntimeCoordinator wanGpRuntimeCoordinator,
         AutonomousGenerationRetryPolicy retryPolicy,
         IOptions<AutonomousGenerationOptions> options,
         ILogger<AutonomousGenerationOrchestrator> logger)
@@ -44,6 +46,7 @@ public sealed class AutonomousGenerationOrchestrator : IAutonomousGenerationOrch
         _audioGenerationService = audioGenerationService;
         _videoGenerationRequestFactory = videoGenerationRequestFactory;
         _finalMovieAssemblyService = finalMovieAssemblyService;
+        _wanGpRuntimeCoordinator = wanGpRuntimeCoordinator;
         _retryPolicy = retryPolicy;
         _options = options.Value;
         _logger = logger;
@@ -76,7 +79,15 @@ public sealed class AutonomousGenerationOrchestrator : IAutonomousGenerationOrch
                 return;
             }
 
-            if (ShouldRunStep(resumeStatus, AutonomousGenerationRunStatus.GeneratingScenes))
+            if (UseStagedPipeline())
+            {
+                var checkpointResumeStatus = resumeStatus is AutonomousGenerationRunStatus.Pending or AutonomousGenerationRunStatus.Validating
+                    ? await DetermineCheckpointResumeStatusAsync(project.Id, snapshot, cancellationToken)
+                    : resumeStatus;
+                await RunStagedPipelineAsync(runId, workerId, checkpointResumeStatus, project, snapshot, cancellationToken);
+                return;
+            }
+            else if (ShouldRunStep(resumeStatus, AutonomousGenerationRunStatus.GeneratingScenes))
             {
                 await TransitionIfAllowedAsync(runId, AutonomousGenerationRunStatus.GeneratingStory, "Hikaye ve eksik sahneler üretiliyor.", cancellationToken);
                 await _storyGenerationService.GenerateAllMissingScenesAsync(
@@ -131,6 +142,76 @@ public sealed class AutonomousGenerationOrchestrator : IAutonomousGenerationOrch
         }
     }
 
+    private async Task RunStagedPipelineAsync(
+        int runId,
+        string? workerId,
+        AutonomousGenerationRunStatus resumeStatus,
+        FilmProject project,
+        AutonomousGenerationConfigurationSnapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        if (ShouldRunPipelineStep(resumeStatus, AutonomousGenerationRunStatus.GeneratingStoryNarrative))
+        {
+            await TransitionIfAllowedAsync(runId, AutonomousGenerationRunStatus.GeneratingStoryNarrative, "Story narrative checkpoint is being generated.", cancellationToken);
+            await _storyGenerationService.GenerateStoryNarrativeAsync(project.Id, BuildStoryProgress(runId, 0, 10), cancellationToken);
+        }
+
+        if (ShouldRunPipelineStep(resumeStatus, AutonomousGenerationRunStatus.GeneratingCharacters))
+        {
+            await TransitionIfAllowedAsync(runId, AutonomousGenerationRunStatus.GeneratingCharacters, "Character continuity checkpoint is being generated.", cancellationToken);
+            await _storyGenerationService.GenerateStoryCharactersAsync(project.Id, BuildStoryProgress(runId, 10, 18), cancellationToken);
+        }
+
+        if (ShouldRunPipelineStep(resumeStatus, AutonomousGenerationRunStatus.GeneratingNarrativeScenes))
+        {
+            await TransitionIfAllowedAsync(runId, AutonomousGenerationRunStatus.GeneratingNarrativeScenes, "Narrative scenes are being generated one at a time.", cancellationToken);
+            await _storyGenerationService.GenerateAllMissingNarrativeScenesAsync(project.Id, BuildStoryProgress(runId, 18, 30), cancellationToken);
+        }
+
+        if (ShouldRunPipelineStep(resumeStatus, AutonomousGenerationRunStatus.GeneratingImagePrompts))
+        {
+            await TransitionIfAllowedAsync(runId, AutonomousGenerationRunStatus.GeneratingImagePrompts, "Image prompts are being generated after narrative scenes.", cancellationToken);
+            await _storyGenerationService.GenerateAllMissingImagePromptsAsync(project.Id, BuildStoryProgress(runId, 30, 35), cancellationToken);
+        }
+
+        var workItems = await _runService.EnsureSceneWorkItemsAsync(runId, cancellationToken);
+        if (workItems.Count == 0)
+        {
+            throw new InvalidOperationException("No scenes found for autonomous generation.");
+        }
+
+        if (ShouldRunPipelineStep(resumeStatus, AutonomousGenerationRunStatus.GeneratingVideoPrompts) ||
+            await HasMissingVideoPromptsAsync(snapshot.FilmProjectId, cancellationToken))
+        {
+            await EnsureAllScenesHaveImagePromptsAsync(snapshot.FilmProjectId, cancellationToken);
+            await TransitionIfAllowedAsync(runId, AutonomousGenerationRunStatus.GeneratingVideoPrompts, "Video prompts are being generated after image prompts and before image generation.", cancellationToken);
+            await _storyGenerationService.GenerateAllMissingVideoPromptsAsync(project.Id, BuildStoryProgress(runId, 35, 45), cancellationToken);
+        }
+
+        if (ShouldRunPipelineStep(resumeStatus, AutonomousGenerationRunStatus.GeneratingImages))
+        {
+            await EnsureAllScenesHaveImagePromptsAsync(snapshot.FilmProjectId, cancellationToken);
+            await EnsureAllScenesHaveVideoPromptsAsync(snapshot.FilmProjectId, cancellationToken);
+            await GenerateImagesAsync(runId, workerId, snapshot, workItems, cancellationToken);
+        }
+
+        if (ShouldRunPipelineStep(resumeStatus, AutonomousGenerationRunStatus.GeneratingVideos))
+        {
+            await EnsureAllScenesHaveVideoPromptsAsync(snapshot.FilmProjectId, cancellationToken);
+            await GenerateVideosAsync(runId, workerId, snapshot, cancellationToken);
+        }
+
+        if (ShouldRunPipelineStep(resumeStatus, AutonomousGenerationRunStatus.GeneratingAudio))
+        {
+            await EnsureAllScenesHaveSelectedVideosAsync(snapshot.FilmProjectId, cancellationToken);
+            await GenerateAudioAsync(runId, workerId, snapshot, cancellationToken);
+        }
+
+        await FinalizeAsync(runId, workerId, snapshot, cancellationToken);
+        await EnsureWorkerOwnershipAsync(runId, workerId, cancellationToken);
+        await _runService.CompleteRunAsync(runId, "Autonomous generation completed.", cancellationToken);
+    }
+
     private async Task GenerateImagesAsync(
         int runId,
         string? workerId,
@@ -150,18 +231,30 @@ public sealed class AutonomousGenerationOrchestrator : IAutonomousGenerationOrch
 
             var scene = scenes[workItem.StorySceneId];
             await _runService.SetCurrentSceneAsync(runId, scene.Id, scene.SceneNumber, cancellationToken);
-            var existingAsset = await _runService.FindValidSelectedImageAssetAsync(scene.Id, cancellationToken);
+            if (string.IsNullOrWhiteSpace(scene.ImagePrompt))
+            {
+                throw new InvalidOperationException($"Scene {scene.SceneNumber} image prompt is empty; image generation did not start.");
+            }
+
+            var existingAsset = await ReconcileExistingImageAsync(workItem, scene, cancellationToken);
             if (existingAsset is not null)
             {
-                await _runService.MarkWorkItemImageAsync(workItem.Id, AutonomousWorkItemStatus.Skipped, existingAsset.Id, null, false, cancellationToken);
+                await _runService.MarkWorkItemImageAsync(workItem.Id, AutonomousWorkItemStatus.Completed, existingAsset.Id, null, false, cancellationToken);
                 await UpdatePipelineProgressAsync(runId, "Geçerli görsel bulundu; yeniden üretilmedi.", 20, 45, index + 1, workItems.Count, cancellationToken);
                 continue;
             }
 
-            await _runService.MarkWorkItemImageAsync(workItem.Id, AutonomousWorkItemStatus.Running, null, null, true, cancellationToken);
+            if (await _runService.HasActiveGenerationJobAsync(scene.Id, MediaType.Image, cancellationToken))
+            {
+                await _runService.MarkWorkItemImageAsync(workItem.Id, AutonomousWorkItemStatus.Running, null, "Existing active image generation job found.", false, cancellationToken);
+                throw new InvalidOperationException($"Scene {scene.SceneNumber} already has an active image generation job; duplicate job was not created.");
+            }
+
             await _retryPolicy.ExecuteAsync(
-                async (_, token) =>
+                async (attempt, token) =>
                 {
+                    await _runService.MarkWorkItemImageAsync(workItem.Id, AutonomousWorkItemStatus.Running, null, null, true, token);
+                    await EnsureWanGpReadyForMediaAttemptAsync(runId, scene.SceneNumber, MediaType.Image, attempt, token);
                     var request = new WanGpImageGenerationRequest
                     {
                         ModelType = string.IsNullOrWhiteSpace(snapshot.ImageModelType) ? "qwen_image_20B" : snapshot.ImageModelType,
@@ -171,20 +264,144 @@ public sealed class AutonomousGenerationOrchestrator : IAutonomousGenerationOrch
                         InferenceSteps = snapshot.ImageInferenceSteps,
                         Seed = snapshot.Seed,
                         RandomSeed = snapshot.RandomSeed,
-                        StopOnError = true
+                        StopOnError = true,
+                        AutoSelectOutput = true
                     };
+
+                    var previousImage = await ResolvePreviousSceneImageReferenceAsync(scene, scenes.Values, token);
+                    if (previousImage is not null)
+                    {
+                        request.SourceImageAssetId = previousImage.Id;
+                        request.SourceImagePath = previousImage.FilePath;
+                    }
 
                     await _imageGenerationService.GenerateSceneImageAsync(scene.Id, request, BuildMediaProgress(runId, 20, 45), token);
                     await EnsureWorkerOwnershipAsync(runId, workerId, token);
-                    var generatedAsset = await _runService.FindValidSelectedImageAssetAsync(scene.Id, token)
+                    var generatedAsset = await ReconcileExistingImageAsync(workItem, scene, token)
                         ?? throw new InvalidOperationException($"Sahne {scene.SceneNumber} görsel üretimi tamamlandı ancak geçerli seçili görsel bulunamadı.");
                     await _runService.MarkWorkItemImageAsync(workItem.Id, AutonomousWorkItemStatus.Completed, generatedAsset.Id, null, false, token);
                 },
-                (ex, attempt, token) => _runService.MarkWorkItemImageAsync(workItem.Id, AutonomousWorkItemStatus.Failed, null, ex.Message, false, token),
+                (ex, attempt, token) => OnMediaFailedAttemptAsync(runId, workItem.Id, scene.SceneNumber, MediaType.Image, ex, attempt, token),
                 cancellationToken);
 
             await UpdatePipelineProgressAsync(runId, "Sahne görseli tamamlandı.", 20, 45, index + 1, workItems.Count, cancellationToken);
         }
+    }
+
+    private async Task EnsureWanGpReadyForMediaAttemptAsync(
+        int runId,
+        int sceneNumber,
+        MediaType mediaType,
+        int attempt,
+        CancellationToken cancellationToken)
+    {
+        var status = await _wanGpRuntimeCoordinator.EnsureReadyAsync(cancellationToken);
+        var mediaLabel = mediaType == MediaType.Video ? "video" : "görsel";
+        if (status.IsReady)
+        {
+            if (attempt > 1)
+            {
+                await _runService.MarkHeartbeatAsync(
+                    runId,
+                    $"{sceneNumber}. sahne {mediaLabel} üretimi için WanGP MCP yeniden hazır; deneme {attempt}.",
+                    cancellationToken: cancellationToken);
+            }
+
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"WanGP MCP runtime {sceneNumber}. sahne {mediaLabel} üretimi için hazır değil. Durum={status.McpState}; Mesaj={status.Message}");
+    }
+
+    private async Task OnMediaFailedAttemptAsync(
+        int runId,
+        int workItemId,
+        int sceneNumber,
+        MediaType mediaType,
+        Exception exception,
+        int attempt,
+        CancellationToken cancellationToken)
+    {
+        if (mediaType == MediaType.Video)
+        {
+            await _runService.MarkWorkItemVideoAsync(workItemId, AutonomousWorkItemStatus.Failed, null, exception.Message, false, cancellationToken);
+        }
+        else
+        {
+            await _runService.MarkWorkItemImageAsync(workItemId, AutonomousWorkItemStatus.Failed, null, exception.Message, false, cancellationToken);
+        }
+
+        var mediaLabel = mediaType == MediaType.Video ? "video" : "görsel";
+        await _runService.MarkHeartbeatAsync(
+            runId,
+            $"{sceneNumber}. sahne {mediaLabel} üretimi {attempt}. denemede hata aldı; WanGP MCP yeniden doğrulanıp aynı sahne tekrar denenecek. {exception.Message}",
+            cancellationToken: cancellationToken);
+
+        try
+        {
+            await _wanGpRuntimeCoordinator.EnsureReadyAsync(cancellationToken);
+        }
+        catch (Exception recoveryException) when (recoveryException is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                recoveryException,
+                "WanGP runtime recovery after failed media attempt did not complete. Scene={SceneNumber}; MediaType={MediaType}; Attempt={Attempt}",
+                sceneNumber,
+                mediaType,
+                attempt);
+        }
+
+        if (_options.MediaRetryDelay > TimeSpan.Zero)
+        {
+            await Task.Delay(_options.MediaRetryDelay, cancellationToken);
+        }
+    }
+
+    private async Task<SceneMediaAsset?> ReconcileExistingImageAsync(
+        AutonomousSceneWorkItem workItem,
+        FilmScene scene,
+        CancellationToken cancellationToken)
+    {
+        var selected = await _runService.FindValidSelectedImageAssetAsync(scene.Id, cancellationToken);
+        if (selected is not null)
+        {
+            if (workItem.ImageMediaAssetId != selected.Id)
+            {
+                await _runService.MarkWorkItemImageAsync(workItem.Id, workItem.ImageStatus, selected.Id, null, false, cancellationToken);
+            }
+
+            return selected;
+        }
+
+        var validAsset = await _runService.FindValidImageAssetAsync(scene.Id, cancellationToken);
+        if (validAsset is null)
+        {
+            return null;
+        }
+
+        await _imageGenerationService.SetSelectedAssetAsync(validAsset.Id, cancellationToken);
+        selected = await _runService.FindValidSelectedImageAssetAsync(scene.Id, cancellationToken) ?? validAsset;
+        await _runService.MarkWorkItemImageAsync(workItem.Id, AutonomousWorkItemStatus.Completed, selected.Id, null, false, cancellationToken);
+        return selected;
+    }
+
+    private async Task<SceneMediaAsset?> ResolvePreviousSceneImageReferenceAsync(
+        FilmScene scene,
+        IEnumerable<FilmScene> allScenes,
+        CancellationToken cancellationToken)
+    {
+        var previousScene = allScenes
+            .Where(candidate => candidate.SceneNumber < scene.SceneNumber)
+            .OrderByDescending(candidate => candidate.SceneNumber)
+            .FirstOrDefault();
+        if (previousScene is null)
+        {
+            return null;
+        }
+
+        return await _runService.FindValidSelectedImageAssetAsync(previousScene.Id, cancellationToken)
+            ?? throw new InvalidOperationException($"Scene {scene.SceneNumber} image generation cannot start before scene {previousScene.SceneNumber} has a valid selected image reference.");
     }
 
     private static bool ShouldRunStep(
@@ -198,6 +415,91 @@ public sealed class AutonomousGenerationOrchestrator : IAutonomousGenerationOrch
              not AutonomousGenerationRunStatus.Cancelled and
              not AutonomousGenerationRunStatus.Completed and
              not AutonomousGenerationRunStatus.Failed);
+
+    private static bool UseStagedPipeline() => true;
+
+    private async Task<AutonomousGenerationRunStatus> DetermineCheckpointResumeStatusAsync(
+        int filmProjectId,
+        AutonomousGenerationConfigurationSnapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        var checkpoint = await _runService.GetProjectCheckpointAsync(filmProjectId, cancellationToken);
+        if (!checkpoint.HasValidStory)
+        {
+            return AutonomousGenerationRunStatus.GeneratingStoryNarrative;
+        }
+
+        if (!checkpoint.HasValidCharacters)
+        {
+            return AutonomousGenerationRunStatus.GeneratingCharacters;
+        }
+
+        if (checkpoint.FirstMissingNarrativeSceneNumber is not null)
+        {
+            return AutonomousGenerationRunStatus.GeneratingNarrativeScenes;
+        }
+
+        if (checkpoint.FirstMissingImagePromptSceneNumber is not null)
+        {
+            return AutonomousGenerationRunStatus.GeneratingImagePrompts;
+        }
+
+        if (checkpoint.FirstMissingVideoPromptSceneNumber is not null)
+        {
+            return AutonomousGenerationRunStatus.GeneratingVideoPrompts;
+        }
+
+        if (checkpoint.FirstMissingSelectedImageSceneNumber is not null)
+        {
+            return AutonomousGenerationRunStatus.GeneratingImages;
+        }
+
+        if (checkpoint.FirstMissingSelectedVideoSceneNumber is not null)
+        {
+            return AutonomousGenerationRunStatus.GeneratingVideos;
+        }
+
+        if (snapshot.GenerateAudio && checkpoint.FirstMissingSceneAudioSceneNumber is not null)
+        {
+            return AutonomousGenerationRunStatus.GeneratingAudio;
+        }
+
+        return AutonomousGenerationRunStatus.Finalizing;
+    }
+
+    private static bool ShouldRunPipelineStep(
+        AutonomousGenerationRunStatus resumeStatus,
+        AutonomousGenerationRunStatus stepStatus)
+    {
+        if (resumeStatus is AutonomousGenerationRunStatus.Completed or
+            AutonomousGenerationRunStatus.Failed or
+            AutonomousGenerationRunStatus.Cancelled or
+            AutonomousGenerationRunStatus.Paused or
+            AutonomousGenerationRunStatus.CancelRequested)
+        {
+            return false;
+        }
+
+        return PipelineIndex(resumeStatus) <= PipelineIndex(stepStatus);
+    }
+
+    private static int PipelineIndex(AutonomousGenerationRunStatus status) => status switch
+    {
+        AutonomousGenerationRunStatus.Pending => 0,
+        AutonomousGenerationRunStatus.Validating => 0,
+        AutonomousGenerationRunStatus.GeneratingStory => 0,
+        AutonomousGenerationRunStatus.GeneratingStoryNarrative => 0,
+        AutonomousGenerationRunStatus.GeneratingCharacters => 1,
+        AutonomousGenerationRunStatus.GeneratingScenes => 2,
+        AutonomousGenerationRunStatus.GeneratingNarrativeScenes => 2,
+        AutonomousGenerationRunStatus.GeneratingImagePrompts => 3,
+        AutonomousGenerationRunStatus.GeneratingVideoPrompts => 4,
+        AutonomousGenerationRunStatus.GeneratingImages => 5,
+        AutonomousGenerationRunStatus.GeneratingVideos => 6,
+        AutonomousGenerationRunStatus.GeneratingAudio => 7,
+        AutonomousGenerationRunStatus.Finalizing => 8,
+        _ => 99
+    };
 
     private async Task GenerateVideosAsync(
         int runId,
@@ -218,6 +520,11 @@ public sealed class AutonomousGenerationOrchestrator : IAutonomousGenerationOrch
 
             var scene = scenes[workItem.StorySceneId];
             await _runService.SetCurrentSceneAsync(runId, scene.Id, scene.SceneNumber, cancellationToken);
+            if (string.IsNullOrWhiteSpace(scene.VideoPrompt))
+            {
+                throw new InvalidOperationException($"Scene {scene.SceneNumber} video prompt is empty; video generation did not start.");
+            }
+
             var existingVideo = await _runService.FindValidSelectedVideoAssetAsync(scene.Id, cancellationToken);
             if (existingVideo is not null)
             {
@@ -226,13 +533,27 @@ public sealed class AutonomousGenerationOrchestrator : IAutonomousGenerationOrch
                 continue;
             }
 
+            if (await _runService.HasActiveGenerationJobAsync(scene.Id, MediaType.Video, cancellationToken))
+            {
+                await _runService.MarkWorkItemVideoAsync(workItem.Id, AutonomousWorkItemStatus.Running, null, "Existing active video generation job found.", false, cancellationToken);
+                throw new InvalidOperationException($"Scene {scene.SceneNumber} already has an active video generation job; duplicate job was not created.");
+            }
+
             var sourceImage = await _runService.FindValidSelectedImageAssetAsync(scene.Id, cancellationToken)
                 ?? throw new InvalidOperationException($"Sahne {scene.SceneNumber} için geçerli seçili görsel yok; video üretimi başlatılmadı.");
 
-            await _runService.MarkWorkItemVideoAsync(workItem.Id, AutonomousWorkItemStatus.Running, null, null, true, cancellationToken);
             await _retryPolicy.ExecuteAsync(
-                async (_, token) =>
+                async (attempt, token) =>
                 {
+                    var reconciledVideo = await _runService.FindValidSelectedVideoAssetAsync(scene.Id, token);
+                    if (reconciledVideo is not null)
+                    {
+                        await _runService.MarkWorkItemVideoAsync(workItem.Id, AutonomousWorkItemStatus.Completed, reconciledVideo.Id, null, false, token);
+                        return;
+                    }
+
+                    await _runService.MarkWorkItemVideoAsync(workItem.Id, AutonomousWorkItemStatus.Running, null, null, true, token);
+                    await EnsureWanGpReadyForMediaAttemptAsync(runId, scene.SceneNumber, MediaType.Video, attempt, token);
                     var request = await _videoGenerationRequestFactory.CreateAsync(new VideoGenerationRequestFactoryInput
                     {
                         FilmProjectId = snapshot.FilmProjectId,
@@ -253,7 +574,7 @@ public sealed class AutonomousGenerationOrchestrator : IAutonomousGenerationOrch
                         ?? throw new InvalidOperationException($"Sahne {scene.SceneNumber} video üretimi tamamlandı ancak geçerli seçili video bulunamadı.");
                     await _runService.MarkWorkItemVideoAsync(workItem.Id, AutonomousWorkItemStatus.Completed, generatedVideo.Id, null, false, token);
                 },
-                (ex, attempt, token) => _runService.MarkWorkItemVideoAsync(workItem.Id, AutonomousWorkItemStatus.Failed, null, ex.Message, false, token),
+                (ex, attempt, token) => OnMediaFailedAttemptAsync(runId, workItem.Id, scene.SceneNumber, MediaType.Video, ex, attempt, token),
                 cancellationToken);
 
             await UpdatePipelineProgressAsync(runId, "Sahne videosu tamamlandı.", 45, 80, index + 1, workItems.Count, cancellationToken);
@@ -510,6 +831,70 @@ public sealed class AutonomousGenerationOrchestrator : IAutonomousGenerationOrch
         catch (InvalidOperationException)
         {
             await _runService.MarkHeartbeatAsync(runId, message, cancellationToken: cancellationToken);
+        }
+    }
+
+    private IProgress<StoryGenerationProgress> BuildStoryProgress(int runId, double basePercentage, double targetPercentage) =>
+        new Progress<StoryGenerationProgress>(progress =>
+        {
+            var source = progress.Percentage > 0 ? progress.Percentage : 0;
+            var mapped = basePercentage + ((targetPercentage - basePercentage) * Math.Clamp(source, 0, 100) / 100);
+            _ = _runService.MarkHeartbeatAsync(runId, progress.Message, mapped, CancellationToken.None);
+        });
+
+    private async Task EnsureAllScenesHaveImagePromptsAsync(int filmProjectId, CancellationToken cancellationToken)
+    {
+        var missing = (await _runService.GetScenesAsync(filmProjectId, cancellationToken))
+            .Where(scene => string.IsNullOrWhiteSpace(scene.ImagePrompt) || string.IsNullOrWhiteSpace(scene.ImageNegativePrompt))
+            .Select(scene => scene.SceneNumber)
+            .FirstOrDefault();
+        if (missing > 0)
+        {
+            throw new InvalidOperationException($"Image generation cannot start before every image prompt is saved. First missing scene={missing}.");
+        }
+    }
+
+    private async Task EnsureAllScenesHaveVideoPromptsAsync(int filmProjectId, CancellationToken cancellationToken)
+    {
+        var missing = (await _runService.GetScenesAsync(filmProjectId, cancellationToken))
+            .Where(scene =>
+                string.IsNullOrWhiteSpace(scene.VideoPrompt) ||
+                string.IsNullOrWhiteSpace(scene.VideoNegativePrompt) ||
+                StoryGenerationService.HasInvalidSilentVideoPromptFields(scene.VideoPrompt, scene.VideoNegativePrompt))
+            .Select(scene => scene.SceneNumber)
+            .FirstOrDefault();
+        if (missing > 0)
+        {
+            throw new InvalidOperationException($"Video generation cannot start before every video prompt is saved. First missing scene={missing}.");
+        }
+    }
+
+    private async Task<bool> HasMissingVideoPromptsAsync(int filmProjectId, CancellationToken cancellationToken) =>
+        (await _runService.GetScenesAsync(filmProjectId, cancellationToken))
+            .Any(scene =>
+                string.IsNullOrWhiteSpace(scene.VideoPrompt) ||
+                string.IsNullOrWhiteSpace(scene.VideoNegativePrompt) ||
+                StoryGenerationService.HasInvalidSilentVideoPromptFields(scene.VideoPrompt, scene.VideoNegativePrompt));
+
+    private async Task EnsureAllScenesHaveSelectedImagesAsync(int filmProjectId, CancellationToken cancellationToken)
+    {
+        foreach (var scene in await _runService.GetScenesAsync(filmProjectId, cancellationToken))
+        {
+            if (await _runService.FindValidSelectedImageAssetAsync(scene.Id, cancellationToken) is null)
+            {
+                throw new InvalidOperationException($"Video prompt generation cannot start before every scene has a valid selected image. First missing scene={scene.SceneNumber}.");
+            }
+        }
+    }
+
+    private async Task EnsureAllScenesHaveSelectedVideosAsync(int filmProjectId, CancellationToken cancellationToken)
+    {
+        foreach (var scene in await _runService.GetScenesAsync(filmProjectId, cancellationToken))
+        {
+            if (await _runService.FindValidSelectedVideoAssetAsync(scene.Id, cancellationToken) is null)
+            {
+                throw new InvalidOperationException($"Audio generation cannot start before every scene has a valid selected video. First missing scene={scene.SceneNumber}.");
+            }
         }
     }
 

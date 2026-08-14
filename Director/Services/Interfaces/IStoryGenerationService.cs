@@ -4,6 +4,31 @@ namespace Director.Services.Interfaces;
 
 public interface IStoryGenerationService
 {
+    Task<StoryGenerationProgressResult> GenerateStoryNarrativeAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    Task<StoryGenerationProgressResult> GenerateStoryCharactersAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    Task<StoryGenerationProgressResult> GenerateAllMissingNarrativeScenesAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    Task<StoryGenerationProgressResult> GenerateAllMissingImagePromptsAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    Task<StoryGenerationProgressResult> GenerateAllMissingVideoPromptsAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
     Task<StoryGenerationProgressResult> GenerateStoryAsync(
         int filmProjectId,
         IProgress<StoryGenerationProgress>? progress = null,

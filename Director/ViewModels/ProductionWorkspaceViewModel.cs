@@ -64,6 +64,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
     private ImageSource? _previewImageSource;
     private string _previewStatus = "Secili gorsel burada goruntulenecek.";
     private bool _showLogs = true;
+    private int _selectedWorkspaceTabIndex;
     private ProductionSceneRowViewModel? _selectedScene;
     private SceneMediaAssetRowViewModel? _selectedAsset;
     private WanGpModelOptionViewModel? _selectedModel;
@@ -177,7 +178,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
     public string McpStatus { get => _mcpStatus; private set => SetProperty(ref _mcpStatus, value); }
     public string ModelStatus { get => _modelStatus; private set => SetProperty(ref _modelStatus, value); }
     public string GuiUrl => _options.GuiUrl;
-    public string McpEndpoint => _options.Endpoint;
+    public string McpEndpoint => _options.GetEffectiveMcpEndpointText();
     public string SelectedModelType { get => _selectedModelType; private set => SetProperty(ref _selectedModelType, value); }
     public string SelectedResolution { get => _selectedResolution; set { if (SetProperty(ref _selectedResolution, value)) OnPropertyChanged(nameof(SelectedModelDetails)); } }
     public string SelectedVideoResolution { get => _selectedVideoResolution; set { if (SetProperty(ref _selectedVideoResolution, value)) RaiseCommandStates(); } }
@@ -293,6 +294,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
     public bool HasPreview => PreviewImageSource is not null;
     public string PreviewStatus { get => _previewStatus; private set => SetProperty(ref _previewStatus, value); }
     public bool ShowLogs { get => _showLogs; set => SetProperty(ref _showLogs, value); }
+    public int SelectedWorkspaceTabIndex { get => _selectedWorkspaceTabIndex; set => SetProperty(ref _selectedWorkspaceTabIndex, Math.Clamp(value, 0, 1)); }
     public string SelectedSceneDisplay => SelectedScene is null ? "-" : SelectedScene.SceneNumber.ToString("000");
     public string SelectedModelDetails => SelectedModel is null
         ? "Model secilmedi."
@@ -495,7 +497,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
             GuiStatus = runtime.GuiState == WanGpGuiState.Open
                 ? $"Acik - {_options.GuiUrl}"
                 : $"Kapali - {_options.GuiUrl}";
-            McpStatus = $"{runtime.McpState} - {_options.Endpoint}";
+            McpStatus = $"{runtime.McpState} - {_options.GetEffectiveMcpEndpointText()}";
             ConnectionStatus = runtime.Message;
             if (!runtime.IsReady)
             {
@@ -537,7 +539,7 @@ public sealed class ProductionWorkspaceViewModel : ObservableObject
             GuiStatus = runtime.GuiState == WanGpGuiState.Open
                 ? $"Acik - {_options.GuiUrl}"
                 : $"Kapali - {_options.GuiUrl}";
-            McpStatus = $"{runtime.McpState} - {_options.Endpoint}";
+            McpStatus = $"{runtime.McpState} - {_options.GetEffectiveMcpEndpointText()}";
             ConnectionStatus = runtime.Message;
             if (!runtime.IsReady)
             {

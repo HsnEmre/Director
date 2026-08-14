@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Director.Data;
@@ -29,8 +30,8 @@ public sealed class StoryGenerationService : IStoryGenerationService
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly string[] VideoPromptAudioTerms =
     {
-        "audio", "sound", "music", "voice", "narration", "narrator", "dialogue", "spoken", "ambient", "lip-sync",
-        "sfx", "song", "muzik", "ses", "diyalog", "anlatici", "konusma"
+        "audio", "sound", "sound effects", "music", "voice", "narration", "narrator", "dialogue", "spoken", "spoken words", "ambient", "lip-sync",
+        "sfx", "song", "müzik", "muzik", "ses", "diyalog", "anlatıcı", "anlatici", "konuşma", "konusma"
     };
 
     private readonly IDbContextFactory<AppDbContext> _dbContextFactory;
@@ -72,6 +73,157 @@ public sealed class StoryGenerationService : IStoryGenerationService
         ILogger<StoryGenerationService> logger)
         : this(dbContextFactory, ollamaClient, promptBuilder, gpuCoordinator, null!, failureDiagnosticWriter, options, logger)
     {
+    }
+
+    public async Task<StoryGenerationProgressResult> GenerateStoryNarrativeAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var projectLease = await AcquireProjectLeaseAsync(filmProjectId, cancellationToken);
+        var project = await LoadProjectSnapshotAsync(filmProjectId, cancellationToken);
+        await UpdateProjectStatusAsync(project.Id, FilmProjectStatus.StoryGenerating, cancellationToken);
+
+        var existing = await LoadExistingStoryAsync(project.Id, cancellationToken);
+        if (existing is not null)
+        {
+            Report(progress, "Story narrative", "Existing FilmStory checkpoint found; narrative generation skipped.", 0, project.CalculatedClipCount, 8, GenerationLogLevel.Success);
+            return ToProgressResult(project.Id, existing, await CountScenesAsync(project.Id, cancellationToken));
+        }
+
+        await _ollamaClient.IsModelAvailableAsync(_options.StoryTextModel, cancellationToken);
+        var systemPrompt = _promptBuilder.BuildStoryNarrativeSystemPrompt();
+        var userPrompt = _promptBuilder.BuildStoryNarrativeUserPrompt(project);
+        var settings = CreateStageGenerationSettings(project.Id, 0, "StoryNarrativeGeneration", SelectStageNumPredict(4096, 8192));
+        var response = await GenerateWithOneRepairAsync<StoryNarrativeResponse>(
+            [new OllamaChatMessage("system", systemPrompt), new OllamaChatMessage("user", userPrompt)],
+            StoryJsonSchemas.StoryNarrativeSchema(),
+            progress,
+            "Story narrative",
+            cancellationToken,
+            _options.StoryTextModel,
+            new OllamaFailureContext(project.Id, 0, "StoryNarrativeGeneration"),
+            ValidateStoryNarrative,
+            initialGenerationSettings: settings,
+            freshRetryGenerationSettings: settings);
+
+        var story = await SaveStoryNarrativeAsync(project.Id, response, cancellationToken);
+        Report(progress, "Story narrative", "FilmStory narrative checkpoint saved.", 0, project.CalculatedClipCount, 10, GenerationLogLevel.Success);
+        return ToProgressResult(project.Id, story, 0);
+    }
+
+    public async Task<StoryGenerationProgressResult> GenerateStoryCharactersAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var projectLease = await AcquireProjectLeaseAsync(filmProjectId, cancellationToken);
+        var project = await LoadProjectSnapshotAsync(filmProjectId, cancellationToken);
+        var story = await LoadStorySnapshotByProjectAsync(project.Id, cancellationToken);
+        if (story.Characters.Count > 0)
+        {
+            Report(progress, "Character continuity", "Existing StoryCharacter checkpoints found; character generation skipped.", 0, project.CalculatedClipCount, 15, GenerationLogLevel.Success);
+            return ToProgressResult(project.Id, story, await CountScenesAsync(project.Id, cancellationToken));
+        }
+
+        await _ollamaClient.IsModelAvailableAsync(_options.StoryTextModel, cancellationToken);
+        var settings = CreateStageGenerationSettings(project.Id, 0, "StoryCharacterGeneration", SelectStageNumPredict(2048, 4096));
+        var response = await GenerateWithOneRepairAsync<StoryCharactersResponse>(
+            [
+                new OllamaChatMessage("system", _promptBuilder.BuildCharacterGenerationSystemPrompt()),
+                new OllamaChatMessage("user", _promptBuilder.BuildCharacterGenerationUserPrompt(project, story))
+            ],
+            StoryJsonSchemas.StoryCharactersSchema(),
+            progress,
+            "Character continuity",
+            cancellationToken,
+            _options.StoryTextModel,
+            new OllamaFailureContext(project.Id, 0, "StoryCharacterGeneration"),
+            ValidateStoryCharactersContainer,
+            initialGenerationSettings: settings,
+            freshRetryGenerationSettings: settings);
+
+        response = await RepairCharacterFieldsAsync(project, story, response, progress, cancellationToken);
+        await SaveStoryCharactersAsync(story.Id, response.Characters, cancellationToken);
+        var updatedStory = await LoadStorySnapshotAsync(story.Id, cancellationToken);
+        Report(progress, "Character continuity", $"{response.Characters.Count} character checkpoint(s) saved.", 0, project.CalculatedClipCount, 18, GenerationLogLevel.Success);
+        return ToProgressResult(project.Id, updatedStory, await CountScenesAsync(project.Id, cancellationToken));
+    }
+
+    public async Task<StoryGenerationProgressResult> GenerateAllMissingNarrativeScenesAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var projectLease = await AcquireProjectLeaseAsync(filmProjectId, cancellationToken);
+        var project = await LoadProjectSnapshotAsync(filmProjectId, cancellationToken);
+        var story = await LoadStorySnapshotByProjectAsync(project.Id, cancellationToken);
+
+        while (true)
+        {
+            var state = await LoadResumeStateAsync(project.Id, cancellationToken);
+            EnsureNoDuplicateScenes(state, project.Id);
+            var nextScene = FindFirstMissingScene(state.SceneNumbers, project.CalculatedClipCount);
+            if (nextScene > project.CalculatedClipCount)
+            {
+                Report(progress, "Narrative scenes", "All narrative scene checkpoints are present.", project.CalculatedClipCount, project.CalculatedClipCount, 30, GenerationLogLevel.Success);
+                return ToProgressResult(project.Id, story, project.CalculatedClipCount);
+            }
+
+            var scene = await GenerateNarrativeSceneAsync(project, story.Id, nextScene, progress, cancellationToken);
+            await SaveNarrativeSceneAsync(project, story.Id, scene, cancellationToken);
+            Report(progress, "Narrative scenes", $"Scene {nextScene} narrative checkpoint saved.", nextScene, project.CalculatedClipCount, MapProgress(18, 30, nextScene, project.CalculatedClipCount), GenerationLogLevel.Success, nextScene, nextScene);
+        }
+    }
+
+    public async Task<StoryGenerationProgressResult> GenerateAllMissingImagePromptsAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var projectLease = await AcquireProjectLeaseAsync(filmProjectId, cancellationToken);
+        var project = await LoadProjectSnapshotAsync(filmProjectId, cancellationToken);
+        var story = await LoadStorySnapshotByProjectAsync(project.Id, cancellationToken);
+        await EnsureAllNarrativeScenesPresentAsync(project, cancellationToken);
+
+        while (true)
+        {
+            var scene = await LoadFirstSceneMissingImagePromptAsync(project.Id, cancellationToken);
+            if (scene is null)
+            {
+                Report(progress, "Image prompts", "All image prompts are present.", project.CalculatedClipCount, project.CalculatedClipCount, 35, GenerationLogLevel.Success);
+                return ToProgressResult(project.Id, story, project.CalculatedClipCount);
+            }
+
+            var prompt = await GenerateImagePromptAsync(project, story.Id, scene.SceneNumber, progress, cancellationToken);
+            await SaveImagePromptAsync(project.Id, prompt, cancellationToken);
+            Report(progress, "Image prompts", $"Scene {scene.SceneNumber} image prompt saved.", scene.SceneNumber, project.CalculatedClipCount, MapProgress(30, 35, scene.SceneNumber, project.CalculatedClipCount), GenerationLogLevel.Success, scene.SceneNumber, scene.SceneNumber);
+        }
+    }
+
+    public async Task<StoryGenerationProgressResult> GenerateAllMissingVideoPromptsAsync(
+        int filmProjectId,
+        IProgress<StoryGenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var projectLease = await AcquireProjectLeaseAsync(filmProjectId, cancellationToken);
+        var project = await LoadProjectSnapshotAsync(filmProjectId, cancellationToken);
+        var story = await LoadStorySnapshotByProjectAsync(project.Id, cancellationToken);
+        await EnsureAllImagePromptsPresentAsync(project, cancellationToken);
+
+        while (true)
+        {
+            var scene = await LoadFirstSceneMissingVideoPromptAsync(project.Id, cancellationToken);
+            if (scene is null)
+            {
+                Report(progress, "Video prompts", "All video prompts are present.", project.CalculatedClipCount, project.CalculatedClipCount, 55, GenerationLogLevel.Success);
+                return ToProgressResult(project.Id, story, project.CalculatedClipCount);
+            }
+
+            var prompt = await GenerateVideoPromptAsync(project, story.Id, scene.SceneNumber, progress, cancellationToken);
+            await SaveVideoPromptAsync(project.Id, prompt, cancellationToken);
+            Report(progress, "Video prompts", $"Scene {scene.SceneNumber} video prompt saved.", scene.SceneNumber, project.CalculatedClipCount, MapProgress(50, 55, scene.SceneNumber, project.CalculatedClipCount), GenerationLogLevel.Success, scene.SceneNumber, scene.SceneNumber);
+        }
     }
 
     public async Task<StoryGenerationProgressResult> GenerateStoryAsync(
@@ -312,6 +464,224 @@ public sealed class StoryGenerationService : IStoryGenerationService
         }
     }
 
+    private async Task<StoryCharactersResponse> RepairCharacterFieldsAsync(
+        FilmProject project,
+        FilmStory story,
+        StoryCharactersResponse response,
+        IProgress<StoryGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            var bible = ToStoryBible(story, response);
+            var issues = StoryCharacterFieldValidator.ValidateIssues(bible);
+            if (issues.Count == 0)
+            {
+                return response;
+            }
+
+            Report(progress, "Character continuity", "Character field correction patch requested.", 0, project.CalculatedClipCount, 17, GenerationLogLevel.Warning);
+            var affectedCharacters = response.Characters
+                .Where(character => issues.Any(issue => issue.CharacterKey.Equals(character.CharacterKey, StringComparison.OrdinalIgnoreCase) || issue.CharacterIndex == response.Characters.IndexOf(character)))
+                .ToList();
+            var settings = CreateStageGenerationSettings(project.Id, 0, "StoryCharacterFieldCorrection", SelectStageNumPredict(256, 512));
+            var corrections = await GenerateWithOneRepairAsync<StoryCharacterCorrectionsResponse>(
+                [
+                    new OllamaChatMessage("system", _promptBuilder.BuildCharacterCorrectionSystemPrompt()),
+                    new OllamaChatMessage("user", _promptBuilder.BuildCharacterCorrectionUserPrompt(affectedCharacters, issues))
+                ],
+                StoryJsonSchemas.StoryCharacterCorrectionsSchema(),
+                progress,
+                "Character field correction",
+                cancellationToken,
+                _options.StoryTextModel,
+                new OllamaFailureContext(project.Id, 0, "StoryCharacterFieldCorrection"),
+                ValidateCharacterCorrections,
+                initialGenerationSettings: settings,
+                freshRetryGenerationSettings: settings,
+                repairGenerationSettings: settings);
+
+            response = ApplyCharacterCorrections(response, corrections, issues);
+        }
+
+        StoryCharacterFieldValidator.Validate(ToStoryBible(story, response));
+        return response;
+    }
+
+    internal static StoryCharactersResponse ApplyCharacterCorrections(
+        StoryCharactersResponse response,
+        StoryCharacterCorrectionsResponse corrections,
+        IReadOnlyList<StoryCharacterValidationIssue> issues)
+    {
+        var allowedFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "characterKey",
+            "name",
+            "role",
+            "physicalDescription",
+            "clothingDescription",
+            "personalityDescription",
+            "voiceDescription",
+            "continuityDescription"
+        };
+        var issueFields = issues
+            .Select(issue => (issue.CharacterKey, issue.FieldName, issue.CharacterIndex))
+            .ToList();
+
+        foreach (var correction in corrections.Corrections)
+        {
+            if (!allowedFields.Contains(correction.Field))
+            {
+                throw new InvalidOperationException($"Unsupported character correction field: {correction.Field}");
+            }
+
+            var indexIssue = issueFields.FirstOrDefault(issue =>
+                issue.FieldName.Equals(correction.Field, StringComparison.OrdinalIgnoreCase) &&
+                issue.CharacterKey.Equals(correction.CharacterKey, StringComparison.OrdinalIgnoreCase));
+            var character = response.Characters.FirstOrDefault(item =>
+                item.CharacterKey.Equals(correction.CharacterKey, StringComparison.OrdinalIgnoreCase));
+            if (character is null && indexIssue.CharacterIndex >= 0 && indexIssue.CharacterIndex < response.Characters.Count)
+            {
+                character = response.Characters[indexIssue.CharacterIndex];
+            }
+
+            if (character is null)
+            {
+                throw new InvalidOperationException($"Character correction target not found: {correction.CharacterKey}");
+            }
+
+            ApplyCharacterField(character, correction.Field, correction.Value);
+        }
+
+        return response;
+    }
+
+    private static void ApplyCharacterField(StoryCharacterResponse character, string field, string value)
+    {
+        var trimmed = value.Trim();
+        switch (field)
+        {
+            case "characterKey":
+                character.CharacterKey = trimmed;
+                break;
+            case "name":
+                character.Name = trimmed;
+                break;
+            case "role":
+                character.Role = trimmed;
+                break;
+            case "physicalDescription":
+                character.PhysicalDescription = trimmed;
+                break;
+            case "clothingDescription":
+                character.ClothingDescription = trimmed;
+                break;
+            case "personalityDescription":
+                character.PersonalityDescription = trimmed;
+                break;
+            case "voiceDescription":
+                character.VoiceDescription = trimmed;
+                break;
+            case "continuityDescription":
+                character.ContinuityDescription = trimmed;
+                break;
+            default:
+                throw new InvalidOperationException($"Unsupported character correction field: {field}");
+        }
+    }
+
+    private async Task<NarrativeSceneResponse> GenerateNarrativeSceneAsync(
+        FilmProject project,
+        int filmStoryId,
+        int sceneNumber,
+        IProgress<StoryGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var story = await LoadStorySnapshotAsync(filmStoryId, cancellationToken);
+        var previousContext = sceneNumber == 1
+            ? OpeningSceneContinuityFromPreviousScene
+            : await BuildPreviousSceneContextAsync(project.Id, sceneNumber, cancellationToken);
+        var systemPrompt = _promptBuilder.BuildNarrativeSceneSystemPrompt();
+        var userPrompt = _promptBuilder.BuildNarrativeSceneUserPrompt(project, story, sceneNumber, previousContext);
+        var settings = CreateStageGenerationSettings(project.Id, sceneNumber, "NarrativeSceneGeneration", SelectStageNumPredict(1024, 2048));
+        var response = await GenerateWithOneRepairAsync<NarrativeSceneResponse>(
+            [new OllamaChatMessage("system", systemPrompt), new OllamaChatMessage("user", userPrompt)],
+            StoryJsonSchemas.NarrativeSceneSchema(),
+            progress,
+            $"Narrative scene {sceneNumber}",
+            cancellationToken,
+            _options.SceneTextModel,
+            new OllamaFailureContext(project.Id, sceneNumber, "NarrativeSceneGeneration"),
+            candidate => ValidateNarrativeSceneResponse(candidate, sceneNumber, project.ClipDurationSeconds),
+            initialGenerationSettings: settings,
+            freshRetryGenerationSettings: settings);
+        NormalizeNarrativeSceneContinuity(response, sceneNumber);
+        return response;
+    }
+
+    private async Task<SceneImagePromptResponse> GenerateImagePromptAsync(
+        FilmProject project,
+        int filmStoryId,
+        int sceneNumber,
+        IProgress<StoryGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var story = await LoadStorySnapshotAsync(filmStoryId, cancellationToken);
+        var scene = await LoadSceneByNumberAsync(project.Id, sceneNumber, cancellationToken);
+        var settings = CreateStageGenerationSettings(project.Id, sceneNumber, "SceneImagePromptGeneration", SelectStageNumPredict(512, 1024));
+        var response = await GenerateWithOneRepairAsync<SceneImagePromptResponse>(
+            [
+                new OllamaChatMessage("system", _promptBuilder.BuildImagePromptSystemPrompt()),
+                new OllamaChatMessage("user", _promptBuilder.BuildImagePromptUserPrompt(project, story, scene))
+            ],
+            StoryJsonSchemas.SceneImagePromptSchema(),
+            progress,
+            $"Image prompt {sceneNumber}",
+            cancellationToken,
+            _options.VisualPromptModel,
+            new OllamaFailureContext(project.Id, sceneNumber, "SceneImagePromptGeneration"),
+            candidate => ValidateImagePromptResponse(candidate, sceneNumber),
+            initialGenerationSettings: settings,
+            freshRetryGenerationSettings: settings,
+            deterministicFallback: () => BuildDeterministicImagePromptFallback(project, scene));
+        response.ImageNegativePrompt = SceneNegativePromptPolicy.SanitizeImage(response.ImageNegativePrompt);
+        return response;
+    }
+
+    private async Task<SceneVideoPromptResponse> GenerateVideoPromptAsync(
+        FilmProject project,
+        int filmStoryId,
+        int sceneNumber,
+        IProgress<StoryGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var story = await LoadStorySnapshotAsync(filmStoryId, cancellationToken);
+        var scene = await LoadSceneByNumberAsync(project.Id, sceneNumber, cancellationToken);
+        var settings = CreateStageGenerationSettings(project.Id, sceneNumber, "SceneVideoPromptGeneration", SelectStageNumPredict(512, 1024));
+        var response = await GenerateWithOneRepairAsync<SceneVideoPromptResponse>(
+            [
+                new OllamaChatMessage("system", _promptBuilder.BuildVideoPromptSystemPrompt()),
+                new OllamaChatMessage("user", _promptBuilder.BuildVideoPromptUserPrompt(project, story, scene, BuildVideoPromptContextSummary(scene)))
+            ],
+            StoryJsonSchemas.SceneVideoPromptSchema(),
+            progress,
+            $"Video prompt {sceneNumber}",
+            cancellationToken,
+            _options.VideoPromptModel,
+            new OllamaFailureContext(project.Id, sceneNumber, "SceneVideoPromptGeneration"),
+            candidate =>
+            {
+                ValidateVideoPromptResponse(candidate, sceneNumber);
+                ValidateSilentVideoPromptFields(candidate.SceneNumber, candidate.VideoPrompt, candidate.VideoNegativePrompt);
+            },
+            initialGenerationSettings: settings,
+            freshRetryGenerationSettings: settings,
+            deterministicFallback: () => BuildDeterministicVideoPromptFallback(project, scene));
+        response.VideoNegativePrompt = SceneNegativePromptPolicy.SanitizeVideo(response.VideoNegativePrompt);
+        ValidateSilentVideoPromptFields(sceneNumber, response.VideoPrompt, response.VideoNegativePrompt);
+        return response;
+    }
+
     private async Task<FilmProject> LoadProjectSnapshotAsync(int filmProjectId, CancellationToken cancellationToken)
     {
         await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
@@ -319,6 +689,357 @@ public sealed class StoryGenerationService : IStoryGenerationService
             .AsNoTracking()
             .FirstOrDefaultAsync(item => item.Id == filmProjectId, cancellationToken)
             ?? throw new InvalidOperationException("Film projesi bulunamadi.");
+    }
+
+    private async Task<FilmStory?> LoadExistingStoryAsync(int filmProjectId, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        return await db.FilmStories
+            .AsNoTracking()
+            .Include(story => story.Characters)
+            .FirstOrDefaultAsync(story => story.FilmProjectId == filmProjectId, cancellationToken);
+    }
+
+    private async Task<FilmStory> LoadStorySnapshotByProjectAsync(int filmProjectId, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        return await db.FilmStories
+            .AsNoTracking()
+            .Include(story => story.Characters)
+            .FirstOrDefaultAsync(story => story.FilmProjectId == filmProjectId, cancellationToken)
+            ?? throw new InvalidOperationException("FilmStory checkpoint is required before this stage.");
+    }
+
+    private async Task<int> CountScenesAsync(int filmProjectId, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        return await db.FilmScenes.AsNoTracking().CountAsync(scene => scene.FilmProjectId == filmProjectId, cancellationToken);
+    }
+
+    private async Task<FilmStory> SaveStoryNarrativeAsync(int filmProjectId, StoryNarrativeResponse narrative, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var existing = await db.FilmStories
+            .Include(story => story.Characters)
+            .FirstOrDefaultAsync(story => story.FilmProjectId == filmProjectId, cancellationToken);
+        if (existing is not null)
+        {
+            return existing;
+        }
+
+        var story = new FilmStory
+        {
+            FilmProjectId = filmProjectId,
+            Title = narrative.Title.Trim(),
+            Logline = narrative.Logline.Trim(),
+            Synopsis = narrative.Synopsis.Trim(),
+            OpeningSummary = narrative.OpeningSummary.Trim(),
+            DevelopmentSummary = narrative.DevelopmentSummary.Trim(),
+            ClimaxSummary = narrative.ClimaxSummary.Trim(),
+            EndingSummary = narrative.EndingSummary.Trim(),
+            WorldDescription = narrative.WorldDescription.Trim(),
+            VisualDirection = narrative.VisualDirection.Trim(),
+            ContinuityRulesJson = JsonSerializer.Serialize(narrative.ContinuityRules, JsonOptions),
+            CreatedAt = DateTime.Now
+        };
+        db.FilmStories.Add(story);
+        await db.SaveChangesAsync(cancellationToken);
+        return story;
+    }
+
+    private async Task SaveStoryCharactersAsync(int filmStoryId, IReadOnlyList<StoryCharacterResponse> characters, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var hasExistingCharacters = await db.StoryCharacters.AnyAsync(character => character.FilmStoryId == filmStoryId, cancellationToken);
+        if (hasExistingCharacters)
+        {
+            return;
+        }
+
+        foreach (var character in characters.Select((value, index) => new { value, index }))
+        {
+            db.StoryCharacters.Add(new StoryCharacter
+            {
+                FilmStoryId = filmStoryId,
+                CharacterKey = character.value.CharacterKey.Trim(),
+                Name = character.value.Name.Trim(),
+                Role = character.value.Role.Trim(),
+                PhysicalDescription = character.value.PhysicalDescription.Trim(),
+                ClothingDescription = character.value.ClothingDescription.Trim(),
+                PersonalityDescription = character.value.PersonalityDescription.Trim(),
+                VoiceDescription = character.value.VoiceDescription.Trim(),
+                ContinuityDescription = character.value.ContinuityDescription.Trim(),
+                ForbiddenChangesJson = JsonSerializer.Serialize(character.value.ForbiddenChanges, JsonOptions),
+                SortOrder = character.index
+            });
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task SaveNarrativeSceneAsync(FilmProject project, int filmStoryId, NarrativeSceneResponse scene, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        if (await db.FilmScenes.AnyAsync(item => item.FilmProjectId == project.Id && item.SceneNumber == scene.SceneNumber, cancellationToken))
+        {
+            return;
+        }
+
+        db.FilmScenes.Add(new FilmScene
+        {
+            FilmProjectId = project.Id,
+            FilmStoryId = filmStoryId,
+            SceneNumber = scene.SceneNumber,
+            DurationSeconds = project.ClipDurationSeconds,
+            Title = scene.Title.Trim(),
+            StoryBeat = scene.StoryBeat.Trim(),
+            SceneDescription = scene.SceneDescription.Trim(),
+            LocationDescription = scene.LocationDescription.Trim(),
+            TimeOfDay = scene.TimeOfDay.Trim(),
+            CharactersJson = JsonSerializer.Serialize(scene.Characters, JsonOptions),
+            ContinuityFromPreviousScene = scene.ContinuityFromPreviousScene.Trim(),
+            ImagePrompt = string.Empty,
+            ImageNegativePrompt = string.Empty,
+            VideoPrompt = string.Empty,
+            VideoNegativePrompt = string.Empty,
+            NarrationText = string.Empty,
+            DialogueJson = "[]",
+            ValidationChecklistJson = JsonSerializer.Serialize(new[] { scene.DialogueIntent.Trim() }, JsonOptions),
+            Status = FilmSceneStatus.Planned,
+            CreatedAt = DateTime.Now
+        });
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task<FilmScene> LoadSceneByNumberAsync(int filmProjectId, int sceneNumber, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        return await db.FilmScenes
+            .AsNoTracking()
+            .FirstOrDefaultAsync(scene => scene.FilmProjectId == filmProjectId && scene.SceneNumber == sceneNumber, cancellationToken)
+            ?? throw new InvalidOperationException($"Scene {sceneNumber} checkpoint not found.");
+    }
+
+    private async Task<FilmScene?> LoadFirstSceneMissingImagePromptAsync(int filmProjectId, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        return await db.FilmScenes
+            .AsNoTracking()
+            .Where(scene => scene.FilmProjectId == filmProjectId && string.IsNullOrWhiteSpace(scene.ImagePrompt))
+            .OrderBy(scene => scene.SceneNumber)
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
+    private async Task<FilmScene?> LoadFirstSceneMissingVideoPromptAsync(int filmProjectId, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var scenes = await BuildVideoPromptCheckpointQuery(db.FilmScenes.AsNoTracking(), filmProjectId)
+            .ToListAsync(cancellationToken);
+
+        return FindFirstMissingOrInvalidVideoPromptCheckpoint(scenes, filmProjectId)?.ToFilmScene();
+    }
+
+    internal static IQueryable<VideoPromptCheckpointScene> BuildVideoPromptCheckpointQuery(
+        IQueryable<FilmScene> scenes,
+        int filmProjectId) =>
+        scenes
+            .Where(scene => scene.FilmProjectId == filmProjectId)
+            .OrderBy(scene => scene.SceneNumber)
+            .Select(scene => new VideoPromptCheckpointScene
+            {
+                Id = scene.Id,
+                FilmProjectId = scene.FilmProjectId,
+                SceneNumber = scene.SceneNumber,
+                VideoPrompt = scene.VideoPrompt,
+                VideoNegativePrompt = scene.VideoNegativePrompt
+            });
+
+    internal static VideoPromptCheckpointScene? FindFirstMissingOrInvalidVideoPromptCheckpoint(
+        IEnumerable<VideoPromptCheckpointScene> scenes,
+        int filmProjectId) =>
+        scenes
+            .Where(scene => scene.FilmProjectId == filmProjectId)
+            .OrderBy(scene => scene.SceneNumber)
+            .FirstOrDefault(scene =>
+                string.IsNullOrWhiteSpace(scene.VideoPrompt) ||
+                string.IsNullOrWhiteSpace(scene.VideoNegativePrompt) ||
+                HasInvalidSilentVideoPromptFields(scene.VideoPrompt, scene.VideoNegativePrompt));
+
+    internal sealed class VideoPromptCheckpointScene
+    {
+        public int Id { get; set; }
+        public int FilmProjectId { get; set; }
+        public int SceneNumber { get; set; }
+        public string VideoPrompt { get; set; } = string.Empty;
+        public string VideoNegativePrompt { get; set; } = string.Empty;
+
+        public FilmScene ToFilmScene() => new()
+        {
+            Id = Id,
+            FilmProjectId = FilmProjectId,
+            SceneNumber = SceneNumber,
+            VideoPrompt = VideoPrompt,
+            VideoNegativePrompt = VideoNegativePrompt
+        };
+    }
+
+    private async Task SaveImagePromptAsync(int filmProjectId, SceneImagePromptResponse prompt, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var scene = await db.FilmScenes.FirstOrDefaultAsync(item => item.FilmProjectId == filmProjectId && item.SceneNumber == prompt.SceneNumber, cancellationToken)
+            ?? throw new InvalidOperationException($"Scene {prompt.SceneNumber} checkpoint not found.");
+        if (!string.IsNullOrWhiteSpace(scene.ImagePrompt))
+        {
+            return;
+        }
+
+        scene.ImagePrompt = prompt.ImagePrompt.Trim();
+        scene.ImageNegativePrompt = prompt.ImageNegativePrompt.Trim();
+        scene.UpdatedAt = DateTime.Now;
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task SaveVideoPromptAsync(int filmProjectId, SceneVideoPromptResponse prompt, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var scene = await db.FilmScenes.FirstOrDefaultAsync(item => item.FilmProjectId == filmProjectId && item.SceneNumber == prompt.SceneNumber, cancellationToken)
+            ?? throw new InvalidOperationException($"Scene {prompt.SceneNumber} checkpoint not found.");
+        if (!string.IsNullOrWhiteSpace(scene.VideoPrompt) &&
+            !string.IsNullOrWhiteSpace(scene.VideoNegativePrompt) &&
+            !HasInvalidSilentVideoPromptFields(scene.VideoPrompt, scene.VideoNegativePrompt))
+        {
+            return;
+        }
+
+        scene.VideoPrompt = prompt.VideoPrompt.Trim();
+        scene.VideoNegativePrompt = prompt.VideoNegativePrompt.Trim();
+        scene.ValidationChecklistJson = JsonSerializer.Serialize(new[] { prompt.StartState.Trim(), prompt.MotionPlan.Trim(), prompt.EndState.Trim() }, JsonOptions);
+        scene.Status = FilmSceneStatus.PromptReady;
+        scene.UpdatedAt = DateTime.Now;
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task<SceneMediaAsset?> LoadSelectedImageAssetAsync(int sceneId, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var asset = await db.SceneMediaAssets
+            .AsNoTracking()
+            .Where(item => item.SceneId == sceneId && item.MediaType == MediaType.Image && item.IsSelected)
+            .OrderByDescending(item => item.CreatedAt)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (asset is null || string.IsNullOrWhiteSpace(asset.FilePath) || !File.Exists(asset.FilePath) || new FileInfo(asset.FilePath).Length == 0)
+        {
+            return null;
+        }
+
+        return asset;
+    }
+
+    private static string BuildVideoPromptContextSummary(FilmScene scene) =>
+        $"Image prompt: {LimitText(scene.ImagePrompt, 900)}\nImage negative prompt: {LimitText(scene.ImageNegativePrompt, 500)}\nClip duration seconds: {scene.DurationSeconds}";
+
+    private SceneImagePromptResponse BuildDeterministicImagePromptFallback(FilmProject project, FilmScene scene)
+    {
+        _logger.LogWarning(
+            "Deterministic image prompt fallback created. ProjectId={ProjectId}; SceneNumber={SceneNumber}; GenerationSource=DeterministicFallback",
+            project.Id,
+            scene.SceneNumber);
+        var continuity = FirstNonEmpty(scene.ContinuityFromPreviousScene, "preserve established story continuity");
+        var prompt = string.Join(", ", new[]
+        {
+            $"single cinematic still for scene {scene.SceneNumber}",
+            LimitText(project.VisualStyle, 160),
+            LimitText(scene.SceneDescription, 320),
+            LimitText(scene.StoryBeat, 220),
+            $"location: {LimitText(scene.LocationDescription, 180)}",
+            $"time of day: {LimitText(scene.TimeOfDay, 80)}",
+            $"continuity: {LimitText(continuity, 220)}",
+            "clear character identities, consistent clothing, coherent composition, production-ready framing"
+        }.Where(item => !string.IsNullOrWhiteSpace(item)));
+
+        return new SceneImagePromptResponse
+        {
+            SceneNumber = scene.SceneNumber,
+            ImagePrompt = LimitText(prompt, 850),
+            ImageNegativePrompt = SceneNegativePromptPolicy.SanitizeImage("low quality, blurry, text, subtitles, watermark, logo, distorted anatomy, inconsistent clothing")
+        };
+    }
+
+    private SceneVideoPromptResponse BuildDeterministicVideoPromptFallback(FilmProject project, FilmScene scene)
+    {
+        _logger.LogWarning(
+            "Deterministic video prompt fallback created. ProjectId={ProjectId}; SceneNumber={SceneNumber}; GenerationSource=DeterministicFallback",
+            project.Id,
+            scene.SceneNumber);
+        var visualAction = FirstNonEmpty(scene.SceneDescription, scene.StoryBeat, "the established subject continues the scene action");
+        var continuity = FirstNonEmpty(scene.ContinuityFromPreviousScene, "preserve the previous visual continuity");
+        var startState = $"Start with the established composition in {LimitText(scene.LocationDescription, 160)} during {LimitText(scene.TimeOfDay, 80)}.";
+        var motionPlan = $"Animate only visible motion: {LimitText(visualAction, 260)}. Characters use readable body language and facial expression; environmental elements move subtly; camera motion follows the requested {LimitText(project.VideoStyle, 120)} style.";
+        var endState = $"End on a stable composition that preserves identities, clothing, lighting, background layout and continuity: {LimitText(continuity, 220)}.";
+        var videoPrompt = string.Join(" ", new[]
+        {
+            startState,
+            motionPlan,
+            endState,
+            "No new objects, no scene transition, no sudden camera jump."
+        });
+
+        var response = new SceneVideoPromptResponse
+        {
+            SceneNumber = scene.SceneNumber,
+            StartState = LimitText(startState, 280),
+            MotionPlan = LimitText(motionPlan, 420),
+            EndState = LimitText(endState, 300),
+            VideoPrompt = LimitText(videoPrompt, 850),
+            VideoNegativePrompt = SceneNegativePromptPolicy.SanitizeVideo("no sound, no music, no dialogue, no subtitles, scene transition, sudden camera jump, identity change, face morphing")
+        };
+        ValidateSilentVideoPromptFields(scene.SceneNumber, response.VideoPrompt, response.VideoNegativePrompt);
+        return response;
+    }
+
+    private static string FirstNonEmpty(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? string.Empty;
+
+    private static string LimitText(string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        return value.Length <= maxLength ? value : value[..maxLength];
+    }
+
+    private async Task EnsureAllNarrativeScenesPresentAsync(FilmProject project, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var sceneNumbers = await db.FilmScenes
+            .AsNoTracking()
+            .Where(scene => scene.FilmProjectId == project.Id)
+            .Select(scene => scene.SceneNumber)
+            .ToListAsync(cancellationToken);
+        var expected = Enumerable.Range(1, project.CalculatedClipCount).ToHashSet();
+        if (!expected.SetEquals(sceneNumbers))
+        {
+            throw new InvalidOperationException("Narrative scenes must be complete before prompt generation starts.");
+        }
+    }
+
+    private async Task EnsureAllImagePromptsPresentAsync(FilmProject project, CancellationToken cancellationToken)
+    {
+        await EnsureAllNarrativeScenesPresentAsync(project, cancellationToken);
+        await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var missing = await db.FilmScenes
+            .AsNoTracking()
+            .Where(scene => scene.FilmProjectId == project.Id &&
+                (string.IsNullOrWhiteSpace(scene.ImagePrompt) || string.IsNullOrWhiteSpace(scene.ImageNegativePrompt)))
+            .OrderBy(scene => scene.SceneNumber)
+            .Select(scene => scene.SceneNumber)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (missing > 0)
+        {
+            throw new InvalidOperationException($"All image prompts must be complete before video prompt generation starts. First missing scene={missing}.");
+        }
     }
 
     private async Task<StoryResumeState> LoadResumeStateAsync(int filmProjectId, CancellationToken cancellationToken)
@@ -363,7 +1084,8 @@ public sealed class StoryGenerationService : IStoryGenerationService
         int gpuSceneId = 0,
         OllamaGenerationSettings? initialGenerationSettings = null,
         OllamaGenerationSettings? freshRetryGenerationSettings = null,
-        OllamaGenerationSettings? repairGenerationSettings = null)
+        OllamaGenerationSettings? repairGenerationSettings = null,
+        Func<T>? deterministicFallback = null)
     {
         var selectedModel = string.IsNullOrWhiteSpace(modelOverride) ? _options.StoryTextModel : modelOverride;
         var streamProgress = CreateOllamaStreamProgress(progress, phase);
@@ -389,14 +1111,13 @@ public sealed class StoryGenerationService : IStoryGenerationService
             Report(progress, phase, "Ollama response alindi ve deserialize edildi.", 0, 0, null, GenerationLogLevel.Success);
             return result.Value;
         }
-        catch (OllamaResponseException ex) when (ex is OllamaIncompleteStreamException or OllamaHttpResponseException or OllamaResponseTooLargeException)
-        {
-            var logPath = await WriteFailureDiagnosticAsync(failureContext, "initial", ex, cancellationToken);
-            throw CreateSceneFailureOrOriginal(failureContext, ex, logPath);
-        }
         catch (OllamaResponseException ex)
         {
             initialFailure = ex;
+        }
+        catch (TimeoutException ex)
+        {
+            initialFailure = CreateTimeoutResponseException(selectedModel, initialSettings, ex);
         }
 
         var initialLogPath = await WriteFailureDiagnosticAsync(failureContext, "initial", initialFailure, cancellationToken);
@@ -423,7 +1144,8 @@ public sealed class StoryGenerationService : IStoryGenerationService
                 streamProgress,
                 gpuProjectId,
                 gpuSceneId,
-                freshRetryGenerationSettings);
+                freshRetryGenerationSettings,
+                deterministicFallback);
         }
 
         _logger.LogWarning(
@@ -475,7 +1197,43 @@ public sealed class StoryGenerationService : IStoryGenerationService
                 repairFailure.Metadata.Done,
                 repairFailure.Metadata.DoneReason,
                 repairLogPath);
-            throw CreateSceneFailureOrOriginal(failureContext, repairFailure, repairLogPath);
+            return await RunFinalRecoveryAsync(
+                messages,
+                schema,
+                progress,
+                phase,
+                cancellationToken,
+                selectedModel,
+                failureContext,
+                validateResponse,
+                streamProgress,
+                gpuProjectId,
+                gpuSceneId,
+                deterministicFallback);
+        }
+        catch (TimeoutException repairTimeout)
+        {
+            var timeoutFailure = CreateTimeoutResponseException(selectedModel, repairSettings, repairTimeout);
+            var repairLogPath = await WriteFailureDiagnosticAsync(failureContext, "repair", timeoutFailure, cancellationToken);
+            _logger.LogWarning(
+                repairTimeout,
+                "Repair response timed out. Model={Model}; Stage={Stage}; Diagnostic={DiagnosticPath}",
+                selectedModel,
+                timeoutFailure.Stage,
+                repairLogPath);
+            return await RunFinalRecoveryAsync(
+                messages,
+                schema,
+                progress,
+                phase,
+                cancellationToken,
+                selectedModel,
+                failureContext,
+                validateResponse,
+                streamProgress,
+                gpuProjectId,
+                gpuSceneId,
+                deterministicFallback);
         }
     }
 
@@ -491,7 +1249,8 @@ public sealed class StoryGenerationService : IStoryGenerationService
         IProgress<OllamaStreamProgress> streamProgress,
         int gpuProjectId,
         int gpuSceneId,
-        OllamaGenerationSettings? freshRetryGenerationSettings)
+        OllamaGenerationSettings? freshRetryGenerationSettings,
+        Func<T>? deterministicFallback)
     {
         var freshMessages = BuildFreshRetryMessages(originalMessages);
         var freshSettings = freshRetryGenerationSettings ?? CreateFreshRetryGenerationSettings(failureContext);
@@ -526,8 +1285,151 @@ public sealed class StoryGenerationService : IStoryGenerationService
                 freshFailure.Metadata.Done,
                 freshFailure.Metadata.DoneReason,
                 freshLogPath);
-            throw CreateSceneFailureOrOriginal(failureContext, freshFailure, freshLogPath);
+            return await RunFinalRecoveryAsync(
+                originalMessages,
+                schema,
+                progress,
+                phase,
+                cancellationToken,
+                selectedModel,
+                failureContext,
+                validateResponse,
+                streamProgress,
+                gpuProjectId,
+                gpuSceneId,
+                deterministicFallback);
         }
+        catch (TimeoutException freshTimeout)
+        {
+            var timeoutFailure = CreateTimeoutResponseException(selectedModel, freshSettings, freshTimeout);
+            var freshLogPath = await WriteFailureDiagnosticAsync(failureContext, "fresh", timeoutFailure, cancellationToken);
+            _logger.LogWarning(
+                freshTimeout,
+                "Fresh retry response timed out. Model={Model}; Stage={Stage}; Diagnostic={DiagnosticPath}",
+                selectedModel,
+                timeoutFailure.Stage,
+                freshLogPath);
+            return await RunFinalRecoveryAsync(
+                originalMessages,
+                schema,
+                progress,
+                phase,
+                cancellationToken,
+                selectedModel,
+                failureContext,
+                validateResponse,
+                streamProgress,
+                gpuProjectId,
+                gpuSceneId,
+                deterministicFallback);
+        }
+    }
+
+    private async Task<T> RunFinalRecoveryAsync<T>(
+        IReadOnlyList<OllamaChatMessage> originalMessages,
+        object schema,
+        IProgress<StoryGenerationProgress>? progress,
+        string phase,
+        CancellationToken cancellationToken,
+        string selectedModel,
+        OllamaFailureContext? failureContext,
+        Action<T>? validateResponse,
+        IProgress<OllamaStreamProgress> streamProgress,
+        int gpuProjectId,
+        int gpuSceneId,
+        Func<T>? deterministicFallback)
+    {
+        var finalMessages = BuildFinalRecoveryMessages(originalMessages, schema, failureContext);
+        var finalSettings = CreateFinalRecoveryGenerationSettings(failureContext);
+        try
+        {
+            LogStructuredAttempt("final-regeneration", phase, selectedModel, finalMessages, finalSettings);
+            var final = await ExecuteGpuCallAsync(
+                () => _ollamaClient.ChatStructuredDetailedAsync<T>(
+                    finalMessages,
+                    schema,
+                    selectedModel,
+                    TimeSpan.FromMinutes(Math.Max(1, _options.SceneHardTimeoutMinutes)),
+                    cancellationToken,
+                    streamProgress,
+                    finalSettings),
+                failureContext?.FilmProjectId ?? gpuProjectId,
+                failureContext?.SceneNumber ?? gpuSceneId,
+                cancellationToken);
+            ValidateDetailedResult(final, validateResponse);
+            LogStructuredSuccess("final-regeneration", phase, selectedModel, final.Metadata, "passed");
+            Report(progress, phase, "Final kısıtlı yeniden üretim cevabı doğrulandı.", 0, 0, null, GenerationLogLevel.Success);
+            return final.Value;
+        }
+        catch (OllamaResponseException finalFailure)
+        {
+            var finalLogPath = await WriteFailureDiagnosticAsync(failureContext, "final-regeneration", finalFailure, cancellationToken);
+            _logger.LogWarning(
+                "Final regeneration failed. Model={Model}; Stage={Stage}; ContentLength={ContentLength}; Done={Done}; DoneReason={DoneReason}; Diagnostic={DiagnosticPath}",
+                selectedModel,
+                finalFailure.Stage,
+                finalFailure.ResponseContent.Length,
+                finalFailure.Metadata.Done,
+                finalFailure.Metadata.DoneReason,
+                finalLogPath);
+
+            return UseFallbackOrThrow(
+                deterministicFallback,
+                validateResponse,
+                progress,
+                phase,
+                failureContext,
+                finalFailure,
+                finalLogPath);
+        }
+        catch (TimeoutException finalTimeout)
+        {
+            var timeoutFailure = CreateTimeoutResponseException(selectedModel, finalSettings, finalTimeout);
+            var finalLogPath = await WriteFailureDiagnosticAsync(failureContext, "final-regeneration", timeoutFailure, cancellationToken);
+            _logger.LogWarning(
+                finalTimeout,
+                "Final regeneration timed out. Model={Model}; Stage={Stage}; Diagnostic={DiagnosticPath}",
+                selectedModel,
+                timeoutFailure.Stage,
+                finalLogPath);
+
+            return UseFallbackOrThrow(
+                deterministicFallback,
+                validateResponse,
+                progress,
+                phase,
+                failureContext,
+                timeoutFailure,
+                finalLogPath);
+        }
+    }
+
+    private T UseFallbackOrThrow<T>(
+        Func<T>? deterministicFallback,
+        Action<T>? validateResponse,
+        IProgress<StoryGenerationProgress>? progress,
+        string phase,
+        OllamaFailureContext? failureContext,
+        OllamaResponseException finalFailure,
+        string finalLogPath)
+    {
+        if (deterministicFallback is null)
+        {
+            throw CreateSceneFailureOrOriginal(failureContext, finalFailure, finalLogPath);
+        }
+
+        var fallback = deterministicFallback();
+        validateResponse?.Invoke(fallback);
+        _logger.LogWarning(
+            "Deterministic fallback used. ProjectId={ProjectId}; SceneNumber={SceneNumber}; Operation={Operation}; Phase={Phase}; GenerationSource=DeterministicFallback; PriorFailureStage={FailureStage}; Diagnostic={DiagnosticPath}",
+            failureContext?.FilmProjectId,
+            failureContext?.SceneNumber,
+            failureContext?.OperationName,
+            phase,
+            finalFailure.Stage,
+            finalLogPath);
+        Report(progress, phase, "Model recovery bütçesi tükendi; deterministic fallback checkpoint üretildi.", 0, 0, null, GenerationLogLevel.Warning);
+        return fallback;
     }
 
     private OllamaGenerationSettings? CreateInitialGenerationSettings(OllamaFailureContext? context)
@@ -574,6 +1476,20 @@ public sealed class StoryGenerationService : IStoryGenerationService
         return settings;
     }
 
+    private OllamaGenerationSettings CreateFinalRecoveryGenerationSettings(OllamaFailureContext? context)
+    {
+        var settings = CreateBaseGenerationSettings(context);
+        settings.Temperature = 0;
+        settings.TopP = 0.05;
+        settings.TopK = 20;
+        settings.RepeatPenalty = 1.05;
+        settings.RepeatLastN = 1024;
+        settings.NumPredict = context is not null && IsSingleSceneGeneration(context)
+            ? _options.SceneRepairNumPredict
+            : Math.Max(_options.SceneRepairNumPredict, 1024);
+        return settings;
+    }
+
     private static OllamaGenerationSettings CreateBaseGenerationSettings(OllamaFailureContext? context) =>
         new()
         {
@@ -601,6 +1517,43 @@ public sealed class StoryGenerationService : IStoryGenerationService
             "The previous attempt was discarded because it hit an output limit or repetition loop. Do not use, quote, continue or repair that output. Regenerate freshly from the original instructions only. Return one complete concise JSON object. Keep comma-separated negative prompts short, unique, and non-repeating."));
         return messages;
     }
+
+    private static IReadOnlyList<OllamaChatMessage> BuildFinalRecoveryMessages(
+        IReadOnlyList<OllamaChatMessage> originalMessages,
+        object schema,
+        OllamaFailureContext? failureContext)
+    {
+        var messages = originalMessages.ToList();
+        messages.Add(new OllamaChatMessage(
+            "user",
+            "Final recovery attempt for the current atomic item only. Ignore every previous failed response. Return one minimal complete JSON object matching the schema exactly. Use the requested sceneNumber exactly. Fill every required field with concise production-safe text derived only from the source context. Do not include markdown, prose, comments, code fences, arrays unless the schema requires them, or extra keys."));
+        if (failureContext is not null)
+        {
+            messages.Add(new OllamaChatMessage(
+                "user",
+                $"Authoritative checkpoint: ProjectId={failureContext.FilmProjectId}; SceneNumber={failureContext.SceneNumber}; Operation={failureContext.OperationName}. Do not rewrite any other scene."));
+        }
+
+        messages.Add(new OllamaChatMessage("user", $"Schema reminder:\n{JsonSerializer.Serialize(schema, JsonOptions)}"));
+        return messages;
+    }
+
+    private static OllamaResponseException CreateTimeoutResponseException(
+        string selectedModel,
+        OllamaGenerationSettings? settings,
+        TimeoutException exception) =>
+        new OllamaIncompleteStreamException(
+            exception.Message,
+            string.Empty,
+            new OllamaResponseMetadata
+            {
+                Model = selectedModel,
+                Endpoint = "/api/chat",
+                OperationName = settings?.OperationName ?? string.Empty,
+                FilmProjectId = settings?.FilmProjectId,
+                SceneNumber = settings?.SceneNumber
+            },
+            exception);
 
     private static string BuildRepairExcerpt(string responseContent)
     {
@@ -1599,6 +2552,187 @@ Validation issues:
         }
     }
 
+    private OllamaGenerationSettings CreateStageGenerationSettings(int filmProjectId, int sceneNumber, string operationName, int numPredict)
+    {
+        var settings = CreateBaseGenerationSettings(new OllamaFailureContext(filmProjectId, sceneNumber, operationName));
+        settings.Temperature = _options.SceneStructuredTemperature;
+        settings.TopP = _options.SceneStructuredTopP;
+        settings.TopK = _options.SceneStructuredTopK;
+        settings.RepeatPenalty = _options.SceneStructuredRepeatPenalty;
+        settings.RepeatLastN = _options.SceneStructuredRepeatLastN;
+        settings.NumPredict = numPredict;
+        return settings;
+    }
+
+    private int SelectStageNumPredict(int minimum, int maximum) =>
+        Math.Clamp(_options.SceneNumPredict, minimum, maximum);
+
+    private static double MapProgress(double from, double to, int completed, int total)
+    {
+        if (total <= 0)
+        {
+            return from;
+        }
+
+        return from + (to - from) * Math.Clamp(completed / (double)total, 0, 1);
+    }
+
+    private static StoryGenerationProgressResult ToProgressResult(int filmProjectId, FilmStory story, int generatedSceneCount) =>
+        new()
+        {
+            FilmProjectId = filmProjectId,
+            FilmStoryId = story.Id,
+            Title = story.Title,
+            GeneratedSceneCount = generatedSceneCount
+        };
+
+    private static StoryBibleResponse ToStoryBible(FilmStory story, StoryCharactersResponse characters) =>
+        new()
+        {
+            Title = story.Title,
+            Logline = story.Logline,
+            Synopsis = story.Synopsis,
+            OpeningSummary = story.OpeningSummary,
+            DevelopmentSummary = story.DevelopmentSummary,
+            ClimaxSummary = story.ClimaxSummary,
+            EndingSummary = story.EndingSummary,
+            WorldDescription = story.WorldDescription,
+            VisualDirection = story.VisualDirection,
+            ContinuityRules = DeserializeStringArray(story.ContinuityRulesJson),
+            Characters = characters.Characters
+        };
+
+    private static List<string> DeserializeStringArray(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<List<string>>(json, JsonOptions) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static void ValidateStoryNarrative(StoryNarrativeResponse narrative)
+    {
+        AddRequiredOrThrow(narrative.Title, "title");
+        AddRequiredOrThrow(narrative.Logline, "logline");
+        AddRequiredOrThrow(narrative.Synopsis, "synopsis");
+        AddRequiredOrThrow(narrative.OpeningSummary, "openingSummary");
+        AddRequiredOrThrow(narrative.DevelopmentSummary, "developmentSummary");
+        AddRequiredOrThrow(narrative.ClimaxSummary, "climaxSummary");
+        AddRequiredOrThrow(narrative.EndingSummary, "endingSummary");
+        AddRequiredOrThrow(narrative.WorldDescription, "worldDescription");
+        AddRequiredOrThrow(narrative.VisualDirection, "visualDirection");
+        if (narrative.ContinuityRules is null)
+        {
+            throw new InvalidOperationException("continuityRules is null");
+        }
+    }
+
+    private static void ValidateStoryCharacters(FilmStory story, StoryCharactersResponse response)
+    {
+        if (response.Characters is null)
+        {
+            throw new InvalidOperationException("characters is null");
+        }
+
+        StoryCharacterFieldValidator.Validate(ToStoryBible(story, response));
+    }
+
+    private static void ValidateStoryCharactersContainer(StoryCharactersResponse response)
+    {
+        if (response.Characters is null)
+        {
+            throw new InvalidOperationException("characters is null");
+        }
+    }
+
+    private static void ValidateCharacterCorrections(StoryCharacterCorrectionsResponse response)
+    {
+        if (response.Corrections is null)
+        {
+            throw new InvalidOperationException("corrections is null");
+        }
+
+        foreach (var correction in response.Corrections)
+        {
+            AddRequiredOrThrow(correction.CharacterKey, "characterKey");
+            AddRequiredOrThrow(correction.Field, "field");
+            AddRequiredOrThrow(correction.Value, "value");
+        }
+    }
+
+    private static void ValidateNarrativeSceneResponse(NarrativeSceneResponse response, int expectedSceneNumber, int expectedDurationSeconds)
+    {
+        NormalizeNarrativeSceneContinuity(response, expectedSceneNumber);
+        var errors = new List<string>();
+        if (response.SceneNumber != expectedSceneNumber) errors.Add($"sceneNumber expected {expectedSceneNumber}, actual {response.SceneNumber}");
+        if (response.DurationSeconds != expectedDurationSeconds) errors.Add($"durationSeconds expected {expectedDurationSeconds}, actual {response.DurationSeconds}");
+        AddRequired(response.Title, "title", errors);
+        AddRequired(response.StoryBeat, "storyBeat", errors);
+        AddRequired(response.SceneDescription, "sceneDescription", errors);
+        AddRequired(response.LocationDescription, "locationDescription", errors);
+        AddRequired(response.TimeOfDay, "timeOfDay", errors);
+        AddRequired(response.DialogueIntent, "dialogueIntent", errors);
+        if (response.Characters is null) errors.Add("characters is null");
+        if (expectedSceneNumber == 1 && response.ContinuityFromPreviousScene != OpeningSceneContinuityFromPreviousScene)
+        {
+            errors.Add($"continuityFromPreviousScene must be exactly {OpeningSceneContinuityFromPreviousScene}");
+        }
+        if (expectedSceneNumber > 1)
+        {
+            AddRequired(response.ContinuityFromPreviousScene, "continuityFromPreviousScene", errors);
+        }
+
+        if (errors.Count > 0)
+        {
+            throw new InvalidOperationException(string.Join(" | ", errors));
+        }
+    }
+
+    private static void ValidateImagePromptResponse(SceneImagePromptResponse response, int expectedSceneNumber)
+    {
+        if (response.SceneNumber != expectedSceneNumber)
+        {
+            throw new InvalidOperationException($"sceneNumber expected {expectedSceneNumber}, actual {response.SceneNumber}");
+        }
+
+        AddRequiredOrThrow(response.ImagePrompt, "imagePrompt");
+        AddRequiredOrThrow(response.ImageNegativePrompt, "imageNegativePrompt");
+    }
+
+    private static void ValidateVideoPromptResponse(SceneVideoPromptResponse response, int expectedSceneNumber)
+    {
+        if (response.SceneNumber != expectedSceneNumber)
+        {
+            throw new InvalidOperationException($"sceneNumber expected {expectedSceneNumber}, actual {response.SceneNumber}");
+        }
+
+        AddRequiredOrThrow(response.VideoPrompt, "videoPrompt");
+        AddRequiredOrThrow(response.VideoNegativePrompt, "videoNegativePrompt");
+        AddRequiredOrThrow(response.StartState, "startState");
+        AddRequiredOrThrow(response.MotionPlan, "motionPlan");
+        AddRequiredOrThrow(response.EndState, "endState");
+    }
+
+    private static void NormalizeNarrativeSceneContinuity(NarrativeSceneResponse response, int expectedSceneNumber)
+    {
+        if (expectedSceneNumber == 1 && string.IsNullOrWhiteSpace(response.ContinuityFromPreviousScene))
+        {
+            response.ContinuityFromPreviousScene = OpeningSceneContinuityFromPreviousScene;
+        }
+    }
+
+    private static void AddRequiredOrThrow(string? value, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new InvalidOperationException($"{fieldName} is empty");
+        }
+    }
+
     internal static void ValidateStoryBible(StoryBibleResponse bible)
     {
         if (string.IsNullOrWhiteSpace(bible.Title))
@@ -1732,14 +2866,26 @@ Validation issues:
     {
         foreach (var scene in scenes)
         {
-            var videoPrompt = NormalizeForValidation(scene.VideoPrompt);
-            var forbiddenTerm = VideoPromptAudioTerms.FirstOrDefault(term => videoPrompt.Contains(NormalizeForValidation(term), StringComparison.OrdinalIgnoreCase));
-            if (forbiddenTerm is not null)
-            {
-                throw new InvalidOperationException($"{scene.SceneNumber}. sahnenin videoPrompt alaninda sessiz video kuralina aykiri ifade bulundu: {forbiddenTerm}");
-            }
+            ValidateSilentVideoPromptFields(scene.SceneNumber, scene.VideoPrompt, scene.VideoNegativePrompt);
         }
     }
+
+    internal static void ValidateSilentVideoPromptFields(int sceneNumber, string? videoPrompt, string? videoNegativePrompt)
+    {
+        if (TryFindForbiddenSilentVideoInstruction(videoPrompt, isNegativePrompt: false, out var forbiddenTerm))
+        {
+            throw new InvalidOperationException($"{sceneNumber}. sahnenin videoPrompt alaninda sessiz video kuralina aykiri ifade bulundu: {forbiddenTerm}");
+        }
+
+        if (TryFindForbiddenSilentVideoInstruction(videoNegativePrompt, isNegativePrompt: true, out forbiddenTerm))
+        {
+            throw new InvalidOperationException($"{sceneNumber}. sahnenin videoNegativePrompt alaninda sessiz video kuralina aykiri ifade bulundu: {forbiddenTerm}");
+        }
+    }
+
+    internal static bool HasInvalidSilentVideoPromptFields(string? videoPrompt, string? videoNegativePrompt) =>
+        TryFindForbiddenSilentVideoInstruction(videoPrompt, isNegativePrompt: false, out _) ||
+        TryFindForbiddenSilentVideoInstruction(videoNegativePrompt, isNegativePrompt: true, out _);
 
     private static void SanitizeSilentVideoPrompts(IEnumerable<ScenePackageItemResponse> scenes)
     {
@@ -1763,10 +2909,157 @@ Validation issues:
             .Split(new[] { '.', '!', '?' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         var allowedParts = parts
-            .Where(part => !VideoPromptAudioTerms.Any(term => NormalizeForValidation(part).Contains(NormalizeForValidation(term), StringComparison.OrdinalIgnoreCase)))
+            .Where(part => !TryFindForbiddenSilentVideoInstruction(part, isNegativePrompt: false, out _))
             .ToList();
 
         return string.Join(". ", allowedParts).Trim();
+    }
+
+    internal static bool TryFindForbiddenSilentVideoInstruction(string? prompt, bool isNegativePrompt, out string forbiddenTerm)
+    {
+        forbiddenTerm = string.Empty;
+        var tokens = TokenizeForValidation(prompt);
+        if (tokens.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var term in VideoPromptAudioTerms)
+        {
+            var termTokens = TokenizeForValidation(term);
+            if (termTokens.Count == 0)
+            {
+                continue;
+            }
+
+            for (var index = 0; index <= tokens.Count - termTokens.Count; index++)
+            {
+                if (!MatchesForbiddenAudioTerm(tokens, index, termTokens))
+                {
+                    continue;
+                }
+
+                if (isNegativePrompt && IsNegativeAudioBlocker(tokens, index))
+                {
+                    continue;
+                }
+
+                forbiddenTerm = term;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static IReadOnlyList<string> TokenizeForValidation(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return [];
+        }
+
+        var decomposed = value.ToLowerInvariant().Normalize(System.Text.NormalizationForm.FormD);
+        var tokens = new List<string>();
+        var builder = new System.Text.StringBuilder();
+        foreach (var raw in decomposed)
+        {
+            if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(raw) == System.Globalization.UnicodeCategory.NonSpacingMark)
+            {
+                continue;
+            }
+
+            var ch = raw switch
+            {
+                'ı' or 'İ' => 'i',
+                'ğ' => 'g',
+                'ü' => 'u',
+                'ş' => 's',
+                'ö' => 'o',
+                'ç' => 'c',
+                _ => raw
+            };
+
+            if (char.IsLetterOrDigit(ch))
+            {
+                builder.Append(ch);
+                continue;
+            }
+
+            FlushToken(builder, tokens);
+        }
+
+        FlushToken(builder, tokens);
+        return tokens;
+    }
+
+    private static void FlushToken(System.Text.StringBuilder builder, List<string> tokens)
+    {
+        if (builder.Length == 0)
+        {
+            return;
+        }
+
+        tokens.Add(builder.ToString());
+        builder.Clear();
+    }
+
+    private static bool MatchesForbiddenAudioTerm(IReadOnlyList<string> tokens, int startIndex, IReadOnlyList<string> termTokens)
+    {
+        if (termTokens.Count == 1 && termTokens[0] == "ses")
+        {
+            return IsTurkishSoundToken(tokens[startIndex]);
+        }
+
+        for (var offset = 0; offset < termTokens.Count; offset++)
+        {
+            if (!MatchesForbiddenToken(tokens[startIndex + offset], termTokens[offset]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool MatchesForbiddenToken(string token, string term) =>
+        term switch
+        {
+            "ses" => IsTurkishSoundToken(token),
+            "muzik" => token == "muzik" || token.StartsWith("muzig", StringComparison.Ordinal) || token.StartsWith("muzik", StringComparison.Ordinal),
+            "konusma" => token == "konusma" || token.StartsWith("konusmalar", StringComparison.Ordinal) || token.StartsWith("konusmay", StringComparison.Ordinal),
+            "diyalog" => token == "diyalog" || token.StartsWith("diyalogl", StringComparison.Ordinal) || token.StartsWith("diyalogu", StringComparison.Ordinal),
+            "anlatici" => token == "anlatici" || token.StartsWith("anlaticin", StringComparison.Ordinal),
+            "narration" => token == "narration",
+            "narrator" => token == "narrator",
+            "voice" => token == "voice" || token.StartsWith("voiceover", StringComparison.Ordinal),
+            "spoken" => token == "spoken",
+            "sound" => token == "sound",
+            _ => token == term
+        };
+
+    private static bool IsTurkishSoundToken(string token) =>
+        token == "ses" ||
+        token.StartsWith("sesi", StringComparison.Ordinal) ||
+        token.StartsWith("sesin", StringComparison.Ordinal) ||
+        token.StartsWith("sese", StringComparison.Ordinal) ||
+        token.StartsWith("sesten", StringComparison.Ordinal) ||
+        token.StartsWith("sesle", StringComparison.Ordinal) ||
+        token.StartsWith("sesler", StringComparison.Ordinal) ||
+        token.StartsWith("sesli", StringComparison.Ordinal);
+
+    private static bool IsNegativeAudioBlocker(IReadOnlyList<string> tokens, int audioTermIndex)
+    {
+        var windowStart = Math.Max(0, audioTermIndex - 3);
+        for (var index = windowStart; index < audioTermIndex; index++)
+        {
+            if (tokens[index] is "no" or "without" or "avoid" or "exclude" or "remove" or "muted" or "mute" or "silent" or "sessiz")
+            {
+                return true;
+            }
+        }
+
+        return audioTermIndex == 0 && (tokens[0] is "silent" or "sessiz");
     }
 
     private static string NormalizeForValidation(string value)

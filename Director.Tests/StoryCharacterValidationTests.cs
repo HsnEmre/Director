@@ -65,10 +65,50 @@ public sealed class StoryCharacterValidationTests
         var json = JsonSerializer.Serialize(StoryJsonSchemas.StoryBibleSchema());
 
         Assert.Contains("\"role\"", json);
-        Assert.Contains("\"maxLength\":80", json);
+        Assert.Contains("\"maxLength\":30", json);
         Assert.Contains("Short narrative function only", json);
         Assert.Contains("physicalDescription", json);
         Assert.Contains("clothingDescription", json);
+    }
+
+    [Fact]
+    public void CharacterCorrectionSchema_IsTinyPatchAndDoesNotReturnStoryBible()
+    {
+        var json = JsonSerializer.Serialize(StoryJsonSchemas.StoryCharacterCorrectionsSchema());
+
+        Assert.Contains("corrections", json);
+        Assert.Contains("characterKey", json);
+        Assert.Contains("field", json);
+        Assert.Contains("value", json);
+        Assert.DoesNotContain("synopsis", json);
+        Assert.DoesNotContain("characters\"", json);
+    }
+
+    [Fact]
+    public void ApplyCharacterCorrections_ChangesOnlyRequestedField()
+    {
+        var response = new StoryCharactersResponse { Characters = [ValidBible().Characters[0]] };
+        var originalPhysical = response.Characters[0].PhysicalDescription;
+        var corrections = new StoryCharacterCorrectionsResponse
+        {
+            Corrections =
+            [
+                new StoryCharacterFieldCorrectionResponse
+                {
+                    CharacterKey = "metehan",
+                    Field = "role",
+                    Value = "Ruler"
+                }
+            ]
+        };
+
+        StoryGenerationService.ApplyCharacterCorrections(
+            response,
+            corrections,
+            [new StoryCharacterValidationIssue(0, "metehan", "role", 90, 30, "Role too long.")]);
+
+        Assert.Equal("Ruler", response.Characters[0].Role);
+        Assert.Equal(originalPhysical, response.Characters[0].PhysicalDescription);
     }
 
     [Fact]

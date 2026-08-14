@@ -50,21 +50,23 @@ public sealed class StoryBibleAutonomousSmokeTests
     }
 
     [Fact]
-    public async Task StoryBibleTwoTokenLimitFailures_ThrowsTruncatedExceptionAndStopsAfterOneRetry()
+    public async Task StoryBibleTokenLimitRecoveryExhausted_ThrowsAfterFinalRegeneration()
     {
         var client = new StoryBibleOllamaClient(
             StoryBible(characterless: true),
             firstCallTokenLimit: true,
-            secondCallTokenLimit: true);
+            secondCallTokenLimit: true,
+            thirdCallTokenLimit: true);
         var service = CreateService(client, out var diagnostics);
 
         var exception = await Assert.ThrowsAsync<OllamaResponseTruncatedException>(() =>
             service.GenerateStoryBibleWithCharacterRepairAsync(SmallSilentProject(), null, CancellationToken.None));
 
         Assert.Contains("token limit", exception.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(2, client.Calls.Count);
-        Assert.Equal(["initial", "fresh"], diagnostics.Attempts);
+        Assert.Equal(3, client.Calls.Count);
+        Assert.Equal(["initial", "fresh", "final-regeneration"], diagnostics.Attempts);
         Assert.DoesNotContain("Malformed response", client.Calls[1].Prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Final recovery attempt", client.Calls[2].Prompt);
     }
 
     [Fact]
@@ -185,7 +187,8 @@ public sealed class StoryBibleAutonomousSmokeTests
     private sealed class StoryBibleOllamaClient(
         StoryBibleResponse response,
         bool firstCallTokenLimit = false,
-        bool secondCallTokenLimit = false) : IOllamaClient
+        bool secondCallTokenLimit = false,
+        bool thirdCallTokenLimit = false) : IOllamaClient
     {
         public const string TruncatedRawMarker = "STORY_BIBLE_TRUNCATED_RAW_MARKER";
         public List<RecordedCall> Calls { get; } = [];
@@ -232,7 +235,9 @@ public sealed class StoryBibleAutonomousSmokeTests
                 ResponseCharacterCount = 1800
             };
 
-            if ((Calls.Count == 1 && firstCallTokenLimit) || (Calls.Count == 2 && secondCallTokenLimit))
+            if ((Calls.Count == 1 && firstCallTokenLimit) ||
+                (Calls.Count == 2 && secondCallTokenLimit) ||
+                (Calls.Count == 3 && thirdCallTokenLimit))
             {
                 metadata.DoneReason = "length";
                 metadata.ResponseTokenCount = generationSettings?.NumPredict ?? 3072;

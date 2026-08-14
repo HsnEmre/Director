@@ -8,6 +8,204 @@ public sealed class StoryPromptBuilder : Interfaces.IStoryPromptBuilder
     private const string SilentVideoRule =
         "Video clips will be generated without audio. Do not include narration, spoken dialogue, music, sound effects, ambient audio or lip-sync instructions inside the video prompt. Dialogue and narration must be stored separately for a later audio-production stage.";
 
+    private const string JsonOnlyStageRule =
+        "Return only valid JSON matching the supplied schema. Do not include markdown, code fences, explanations or extra fields. Keep this stage separate; do not produce fields owned by later stages.";
+
+    public string BuildStoryNarrativeSystemPrompt()
+    {
+        return "You are a professional film story architect for a staged AI film production pipeline. " + JsonOnlyStageRule + " Produce only the story narrative fields. Do not produce characters, scene plans, image prompts, video prompts, dialogue, narration or audio instructions.";
+    }
+
+    public string BuildStoryNarrativeUserPrompt(FilmProject project)
+    {
+        return $"""
+Create the story narrative checkpoint for this film project.
+Project name: {project.ProjectName}
+Subject: {project.Subject}
+Total duration minutes: {project.TotalDurationMinutes}
+Clip duration seconds: {project.ClipDurationSeconds}
+Exact scene count required later: {project.CalculatedClipCount}
+Language for title, logline and synopsis: {project.Language}
+Target audience: {project.TargetAudience}
+Genre: {project.StoryGenre}
+Visual style: {project.VisualStyle}
+Video style: {project.VideoStyle}
+Aspect ratio: {project.AspectRatio}
+Resolution: {project.Resolution}
+Use narrator: {project.UseNarrator}
+Narrator tone: {project.NarratorTone}
+Main character notes: {project.MainCharacterDescription}
+Additional instructions: {project.AdditionalInstructions}
+
+Return only: title, logline, synopsis, openingSummary, developmentSummary, climaxSummary, endingSummary, worldDescription, visualDirection, continuityRules.
+Do not return a characters array. Do not return scenes or media prompts.
+""";
+    }
+
+    public string BuildCharacterGenerationSystemPrompt()
+    {
+        return "You are creating a compact character continuity bible for a staged AI film pipeline. " + JsonOnlyStageRule + " Produce only characters. Role must be a short narrative function, maximum 30 characters. Put appearance only in physicalDescription and clothing/equipment only in clothingDescription.";
+    }
+
+    public string BuildCharacterGenerationUserPrompt(FilmProject project, FilmStory story)
+    {
+        return $"""
+Create the character continuity checkpoint for this already-saved story.
+Project: {project.ProjectName}
+Subject: {Limit(project.Subject, 700)}
+Story title: {story.Title}
+Logline: {story.Logline}
+Synopsis: {story.Synopsis}
+World: {story.WorldDescription}
+Visual direction: {story.VisualDirection}
+Main character notes: {Limit(project.MainCharacterDescription, 500)}
+Additional instructions: {Limit(project.AdditionalInstructions, 600)}
+
+Return only a characters array.
+If the film has no real human, animal or creature character, return an empty characters array.
+Do not invent characters for objects, locations, weather, lights, vehicles, buildings, landscapes or atmosphere.
+For each character, role is only a story function such as Protagonist, Ruler, Ally, Commander, Antagonist. Maximum 30 characters, no sentence, no appearance, no clothing.
+""";
+    }
+
+    public string BuildCharacterCorrectionSystemPrompt()
+    {
+        return "You repair character field validation issues by returning a tiny JSON patch only. " + JsonOnlyStageRule + " Each correction must include only characterKey, field and value. Do not return the full story, full character list or unchanged fields.";
+    }
+
+    public string BuildCharacterCorrectionUserPrompt(
+        IReadOnlyList<StoryCharacterResponse> characters,
+        IReadOnlyList<StoryCharacterValidationIssue> issues)
+    {
+        var characterText = string.Join(Environment.NewLine, characters.Select(character =>
+            $"{character.CharacterKey}: role={Limit(character.Role, 160)} | physical={Limit(character.PhysicalDescription, 220)} | clothing={Limit(character.ClothingDescription, 220)}"));
+        var issueText = string.Join(Environment.NewLine, issues.Select(issue =>
+            $"- characterKey={issue.CharacterKey}; field={issue.FieldName}; length={issue.ActualLength}/{issue.MaxLength}; reason={issue.Reason}"));
+
+        return $"""
+Repair only the invalid fields listed below.
+Current affected characters:
+{characterText}
+
+Validation issues:
+{issueText}
+
+Allowed fields: characterKey, name, role, physicalDescription, clothingDescription, personalityDescription, voiceDescription, continuityDescription.
+Role must be a short narrative function, maximum 30 characters.
+Move appearance details to physicalDescription. Move clothing, armor, weapons and equipment details to clothingDescription.
+Return only corrections. Do not include unchanged fields.
+""";
+    }
+
+    public string BuildNarrativeSceneSystemPrompt()
+    {
+        return "You create one narrative scene checkpoint for a staged AI film pipeline. " + JsonOnlyStageRule + " Do not produce image prompts, video prompts, narration text, dialogue lines, sound, music or audio instructions. Technical fields must be in English.";
+    }
+
+    public string BuildNarrativeSceneUserPrompt(
+        FilmProject project,
+        FilmStory story,
+        int sceneNumber,
+        string previousSceneContext)
+    {
+        var characters = string.Join(Environment.NewLine, story.Characters
+            .OrderBy(character => character.SortOrder)
+            .Take(8)
+            .Select(character => $"{character.CharacterKey}: {character.Name}, {character.Role}. Continuity: {Limit(character.ContinuityDescription, 180)}"));
+        var storySection = SelectStorySection(story, sceneNumber, project.CalculatedClipCount);
+        var continuityRule = sceneNumber == 1
+            ? $"continuityFromPreviousScene must be exactly \"{StoryGenerationService.OpeningSceneContinuityFromPreviousScene}\"."
+            : "continuityFromPreviousScene is required and must briefly describe a concrete visual, spatial, temporal or action link from the previous scene.";
+
+        return $"""
+Create only narrative scene {sceneNumber} of {project.CalculatedClipCount}.
+Target duration seconds: {project.ClipDurationSeconds}
+Project subject: {Limit(project.Subject, 300)}
+Story title: {Limit(story.Title, 160)}
+Synopsis: {Limit(story.Synopsis, 700)}
+Relevant story section: {Limit(storySection, 700)}
+World: {Limit(story.WorldDescription, 500)}
+Visual direction: {Limit(story.VisualDirection, 500)}
+Scene position: {DescribeScenePosition(sceneNumber, project.CalculatedClipCount)}
+Previous scene context: {Limit(previousSceneContext, 500)}
+Continuity contract: {continuityRule}
+Allowed characters:
+{characters}
+
+Return only sceneNumber, durationSeconds, title, storyBeat, sceneDescription, locationDescription, timeOfDay, characters, continuityFromPreviousScene and dialogueIntent.
+Do not include imagePrompt, videoPrompt, dialogueJson, narrationText or validationChecklist.
+""";
+    }
+
+    public string BuildImagePromptSystemPrompt()
+    {
+        return "You create a single image prompt after all narrative scenes are saved. " + JsonOnlyStageRule + " Return only sceneNumber, imagePrompt and imageNegativePrompt. Technical prompt fields must be English.";
+    }
+
+    public string BuildImagePromptUserPrompt(FilmProject project, FilmStory story, FilmScene scene)
+    {
+        var characterDetails = string.Join(Environment.NewLine, story.Characters
+            .OrderBy(character => character.SortOrder)
+            .Where(character => CharacterListContains(scene.CharactersJson, character.CharacterKey))
+            .Select(character => $"{character.CharacterKey}: {character.Name}. Physical: {Limit(character.PhysicalDescription, 220)} Clothing: {Limit(character.ClothingDescription, 220)} Continuity: {Limit(character.ContinuityDescription, 160)}"));
+
+        return $"""
+Create the image prompt for scene {scene.SceneNumber}.
+Project: {project.ProjectName}
+Visual style: {Limit(project.VisualStyle, 300)}
+Aspect ratio/resolution: {project.AspectRatio}; {project.Resolution}
+Story title: {story.Title}
+World: {Limit(story.WorldDescription, 500)}
+Visual direction: {Limit(story.VisualDirection, 500)}
+Scene title: {scene.Title}
+Story beat: {scene.StoryBeat}
+Scene description: {scene.SceneDescription}
+Location: {scene.LocationDescription}
+Time of day: {scene.TimeOfDay}
+Continuity from previous scene: {scene.ContinuityFromPreviousScene}
+Characters in scene:
+{characterDetails}
+
+The imagePrompt must describe one fixed film frame: subjects, physical traits, clothing, setting, lighting, camera angle, lens/framing, mood and continuity.
+The imageNegativePrompt must be short comma-separated terms only.
+""";
+    }
+
+    public string BuildVideoPromptSystemPrompt()
+    {
+        return "You create a single image-to-video motion prompt after image prompts are saved and before image generation starts. " + JsonOnlyStageRule + " Return only sceneNumber, videoPrompt, videoNegativePrompt, startState, motionPlan and endState. Do not include audio, sound, narration, dialogue, music or lip-sync instructions.";
+    }
+
+    public string BuildVideoPromptUserPrompt(
+        FilmProject project,
+        FilmStory story,
+        FilmScene scene,
+        string imagePromptContext)
+    {
+        return $"""
+Create the video prompt for scene {scene.SceneNumber} from the narrative scene and saved image prompt context.
+Project: {project.ProjectName}
+Video style: {Limit(project.VideoStyle, 300)}
+Clip duration seconds: {project.ClipDurationSeconds}
+Story title: {story.Title}
+Synopsis: {Limit(story.Synopsis, 600)}
+Scene title: {scene.Title}
+Story beat: {scene.StoryBeat}
+Scene description: {scene.SceneDescription}
+Location: {scene.LocationDescription}
+Time of day: {scene.TimeOfDay}
+Continuity from previous scene: {scene.ContinuityFromPreviousScene}
+Existing image prompt: {Limit(scene.ImagePrompt, 900)}
+Existing image negative prompt: {Limit(scene.ImageNegativePrompt, 500)}
+Image prompt context: {imagePromptContext}
+
+Plan motion for the still frame described by the image prompt. Do not depend on an already generated image.
+Preserve character identity, clothing, proportions, lighting, background layout and composition described in the image prompt.
+The videoPrompt must describe visible motion, facial/gaze/body changes, environmental motion, one camera movement, pace and final position.
+The videoNegativePrompt must be short comma-separated terms only.
+""";
+    }
+
     public string BuildStoryBibleSystemPrompt()
     {
         return "You are a professional film story architect for an AI film production pipeline. Return only valid JSON matching the provided schema. Do not include markdown. Create a coherent story bible, character continuity bible and visual direction. Keep story, narration and dialogue language aligned with the user's selected language. Image and video prompts will be produced later in English. For every character, role contains only a short narrative role such as Protagonist, Ruler, Warrior Ally, Commander, or Political Antagonist. Never place appearance, clothing or equipment details in role. physicalDescription contains appearance. clothingDescription contains clothing and equipment.";
@@ -220,6 +418,10 @@ Return one JSON object for scene {sceneNumber}. Do not include scenes before or 
             _ => "ending resolution"
         };
     }
+
+    private static bool CharacterListContains(string charactersJson, string characterKey) =>
+        !string.IsNullOrWhiteSpace(characterKey) &&
+        charactersJson.Contains(characterKey, StringComparison.OrdinalIgnoreCase);
 
     private static string Limit(string? value, int maxLength)
     {

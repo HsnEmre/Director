@@ -30,6 +30,7 @@ public sealed class VideoGenerationService : IVideoGenerationService
     private readonly IMediaFileService _mediaFileService;
     private readonly IApplicationActivityCenter _activityCenter;
     private readonly OllamaOptions _ollamaOptions;
+    private readonly WanGpOptions _wanGpOptions;
     private readonly ILogger<VideoGenerationService> _logger;
     private readonly object _activeJobLock = new();
     private string? _activeExternalJobId;
@@ -44,6 +45,7 @@ public sealed class VideoGenerationService : IVideoGenerationService
         IMediaFileService mediaFileService,
         IApplicationActivityCenter activityCenter,
         IOptions<OllamaOptions> ollamaOptions,
+        IOptions<WanGpOptions> wanGpOptions,
         ILogger<VideoGenerationService> logger)
     {
         _dbContextFactory = dbContextFactory;
@@ -55,6 +57,7 @@ public sealed class VideoGenerationService : IVideoGenerationService
         _mediaFileService = mediaFileService;
         _activityCenter = activityCenter;
         _ollamaOptions = ollamaOptions.Value;
+        _wanGpOptions = wanGpOptions.Value;
         _logger = logger;
     }
 
@@ -65,6 +68,8 @@ public sealed class VideoGenerationService : IVideoGenerationService
     {
         var scene = await LoadSceneAsync(request.SceneId, cancellationToken);
         GenerationJob? job = null;
+        WanGpOutputSnapshot? beforeSnapshot = null;
+        DateTime? submittedAt = null;
         try
         {
             var reference = await LoadSelectedReferenceAssetAsync(scene, request.SourceImageAssetId, cancellationToken);
@@ -77,7 +82,7 @@ public sealed class VideoGenerationService : IVideoGenerationService
             var build = await _requestBuilder.BuildAsync(request, cancellationToken);
             AssertImageToVideoRequest(request, build, reference);
             _activityCenter.AddLog("Video", "Referans gorsel WanGP Start Image alanina eklendi.", GenerationLogLevel.Success);
-            var beforeSnapshot = _outputResolver.CaptureSnapshot();
+            beforeSnapshot = _outputResolver.CaptureSnapshot();
             job = await CreateJobAsync(scene, reference.Id, request, build, cancellationToken);
             _activityCenter.SetActiveJob(job.Id, null);
 
@@ -89,7 +94,7 @@ public sealed class VideoGenerationService : IVideoGenerationService
                 scene.Id,
                 cancellationToken))
             {
-            var submittedAt = DateTime.Now;
+            submittedAt = DateTime.Now;
             submission = await _wanGpClient.SubmitVideoGenerationAsync(build.Source, cancellationToken);
             if (string.IsNullOrWhiteSpace(submission.ExternalJobId))
             {
@@ -113,7 +118,7 @@ public sealed class VideoGenerationService : IVideoGenerationService
 
             progress?.Report(new MediaGenerationProgress { Phase = "VideoGenerating", Message = $"Sahne {scene.SceneNumber} video uretimi baslatildi.", OverallProgress = 5, ExternalJobId = submission.ExternalJobId });
 
-            snapshot = await PollUntilVideoOutputAsync(job.Id, submission.ExternalJobId, scene.SceneNumber, beforeSnapshot, submittedAt, progress, cancellationToken);
+            snapshot = await PollUntilVideoOutputAsync(job.Id, submission.ExternalJobId, scene.SceneNumber, beforeSnapshot, submittedAt.Value, progress, cancellationToken);
             }
             if (snapshot.Status != GenerationJobStatus.Completed)
             {
@@ -154,6 +159,18 @@ public sealed class VideoGenerationService : IVideoGenerationService
             }
 
             throw;
+        }
+        catch (WanGpToolExecutionException ex) when (IsWanGpGenerationAlreadyInProgress(ex) && job is not null && beforeSnapshot is not null && submittedAt is not null)
+        {
+            return await ReconcileBusyWanGpVideoSubmissionAsync(
+                scene,
+                job,
+                request,
+                ex,
+                beforeSnapshot,
+                submittedAt.Value,
+                progress,
+                cancellationToken);
         }
         catch (Exception ex)
         {
@@ -416,6 +433,95 @@ public sealed class VideoGenerationService : IVideoGenerationService
     private static bool IsTransientWanGpPollingFailure(Exception exception) =>
         exception is WanGpMcpTransportException or HttpRequestException or IOException or TimeoutException ||
         exception.GetType().Name.Contains("Transport", StringComparison.OrdinalIgnoreCase);
+
+    private async Task<GenerationJob> ReconcileBusyWanGpVideoSubmissionAsync(
+        FilmScene scene,
+        GenerationJob job,
+        WanGpVideoGenerationRequest request,
+        WanGpToolExecutionException exception,
+        WanGpOutputSnapshot beforeSnapshot,
+        DateTime submittedAt,
+        IProgress<MediaGenerationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        const string syntheticExternalJobIdPrefix = "wan-gp-busy-reconcile";
+        var syntheticExternalJobId = $"{syntheticExternalJobIdPrefix}-{job.Id}";
+        var wait = TimeSpan.FromMinutes(Math.Max(1, _wanGpOptions.GenerationTimeoutMinutes));
+        _logger.LogWarning(
+            exception,
+            "WanGP reported an already-running generation during video submit. Director will wait for filesystem output before failing. JobId={JobId}; Scene={SceneNumber}; TimeoutMinutes={TimeoutMinutes}",
+            job.Id,
+            scene.SceneNumber,
+            wait.TotalMinutes);
+
+        await UpdateJobAsync(job.Id, existing =>
+        {
+            existing.Status = GenerationJobStatus.Running;
+            existing.ExternalJobId = syntheticExternalJobId;
+            existing.CurrentPhase = "VideoBusyReconciling";
+            existing.ErrorMessage = string.Empty;
+            existing.UpdatedAt = DateTime.Now;
+        }, cancellationToken);
+
+        _activityCenter.SetActiveJob(job.Id, syntheticExternalJobId);
+        progress?.Report(new MediaGenerationProgress
+        {
+            Phase = "VideoBusyReconciling",
+            Message = $"Sahne {scene.SceneNumber} icin WanGP zaten aktif uretim bildiriyor; olusan video output'u bekleniyor.",
+            OverallProgress = 5,
+            CurrentSceneNumber = scene.SceneNumber,
+            ExternalJobId = syntheticExternalJobId
+        });
+
+        try
+        {
+            var snapshot = await TryResolveFilesystemOutputAsync(
+                job.Id,
+                syntheticExternalJobId,
+                scene.SceneNumber,
+                beforeSnapshot,
+                submittedAt,
+                null,
+                wait,
+                cancellationToken);
+            if (snapshot is not null)
+            {
+                var outputPath = snapshot.GeneratedFiles.FirstOrDefault() ?? snapshot.OutputPath
+                    ?? throw new InvalidOperationException("WanGP busy reconcile output dosyasi bulunamadi.");
+                var asset = await SaveCompletedVideoAssetAsync(scene.Id, job.Id, request.SourceImageAssetId, outputPath, request, cancellationToken);
+                WriteOutputSummary(syntheticExternalJobId, "busy_reconciled_filesystem_output", outputPath, asset);
+                progress?.Report(new MediaGenerationProgress
+                {
+                    Phase = "Completed",
+                    Message = $"Sahne {scene.SceneNumber} videosu WanGP busy reconcile ile kaydedildi: v{asset.VersionNumber}",
+                    OverallProgress = 100,
+                    SceneProgress = 100,
+                    CurrentSceneNumber = scene.SceneNumber,
+                    ModelType = request.ModelType,
+                    PreviewPath = asset.FilePath,
+                    ExternalJobId = syntheticExternalJobId
+                });
+                _activityCenter.AddLog("Video", $"Sahne {scene.SceneNumber} videosu WanGP busy reconcile ile hazir.", GenerationLogLevel.Success);
+                return await LoadCompletedJobAsync(job.Id, cancellationToken);
+            }
+
+            var message = "WanGP zaten aktif uretim bildiriyor ancak output reconciliation final video bulamadi.";
+            await MarkJobFailedBestEffortAsync(job.Id, $"{message} {exception.Message}");
+            throw new InvalidOperationException(message, exception);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await MarkJobFailedBestEffortAsync(job.Id, ex.Message);
+            throw;
+        }
+    }
+
+    private static bool IsWanGpGenerationAlreadyInProgress(WanGpToolExecutionException exception) =>
+        exception.ToolName.Equals("wangp_generate", StringComparison.OrdinalIgnoreCase) &&
+        (exception.Message.Contains("generation in progress", StringComparison.OrdinalIgnoreCase) ||
+         exception.Detail.Contains("generation in progress", StringComparison.OrdinalIgnoreCase) ||
+         exception.Message.Contains("already has a generation", StringComparison.OrdinalIgnoreCase) ||
+         exception.Detail.Contains("already has a generation", StringComparison.OrdinalIgnoreCase));
 
     private async Task<SceneMediaAsset> SaveCompletedVideoAssetAsync(int sceneId, int jobId, int sourceImageAssetId, string outputPath, WanGpVideoGenerationRequest request, CancellationToken cancellationToken)
     {

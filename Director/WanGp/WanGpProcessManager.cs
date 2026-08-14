@@ -40,7 +40,7 @@ public sealed class WanGpProcessManager : IWanGpProcessManager
         var startInfo = new ProcessStartInfo
         {
             FileName = _options.PythonExecutablePath,
-            Arguments = $"wgp.py --mcp --mcp-transport streamable-http --mcp-host {_options.Host} --mcp-port {_options.Port}",
+            Arguments = WanGpRuntimeCoordinator.BuildMcpArguments(_options),
             WorkingDirectory = _options.RootPath,
             UseShellExecute = false,
             CreateNoWindow = true,

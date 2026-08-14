@@ -405,7 +405,13 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
     public bool HasAutonomousRun
     {
         get => _hasAutonomousRun;
-        private set => SetProperty(ref _hasAutonomousRun, value);
+        private set
+        {
+            if (SetProperty(ref _hasAutonomousRun, value))
+            {
+                OnPropertyChanged(nameof(PrimaryActionText));
+            }
+        }
     }
 
     public int? AutonomousRunId
@@ -428,6 +434,7 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         {
             if (SetProperty(ref _hasActiveAutonomousRun, value))
             {
+                OnPropertyChanged(nameof(PrimaryActionText));
                 RaiseCommandStates();
             }
         }
@@ -620,6 +627,7 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
             _hasUnsavedChanges = false;
             StatusMessage = "Otonom üretim kuyruğa alındı. Arka plan worker güvenli checkpoint'lerden devam edecek.";
             _messageService.ShowInfo("Otonom üretim başlatıldı/sürdürüldü.");
+            await NavigateToAutonomousWorkspaceAsync(summary);
         }
         finally
         {
@@ -638,11 +646,46 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
 
     private async Task ResumeAutonomousAsync()
     {
+        if (CurrentProjectId is not int projectId)
+        {
+            return;
+        }
+
+        var latest = await _autonomousRunService.GetLatestRunForProjectAsync(projectId);
+        if (latest?.Status == AutonomousGenerationRunStatus.Paused)
+        {
+            await _autonomousRunService.ResumeAsync(latest.Id);
+            await LoadAutonomousRunSummaryAsync();
+            var resumed = await _autonomousRunService.GetLatestRunForProjectAsync(projectId);
+            if (resumed is not null)
+            {
+                await NavigateToAutonomousWorkspaceAsync(resumed);
+            }
+            return;
+        }
+
+        var summary = await _autonomousRunService.StartOrGetActiveRunAsync(projectId, BuildAutonomousSnapshot(projectId));
+        ApplyAutonomousSummary(summary);
+        StatusMessage = "Otonom üretim devam etmek üzere kuyruğa alındı.";
+        await NavigateToAutonomousWorkspaceAsync(summary);
+    }
+
+    private async Task RetryAutonomousAsync()
+    {
+        if (CurrentProjectId is not int projectId)
+        {
+            return;
+        }
+
         if (AutonomousRunId is int runId)
         {
-            await _autonomousRunService.ResumeAsync(runId);
-            await LoadAutonomousRunSummaryAsync();
+            await _autonomousRunService.RetryAsync(runId);
         }
+
+        var summary = await _autonomousRunService.StartOrGetActiveRunAsync(projectId, BuildAutonomousSnapshot(projectId));
+        ApplyAutonomousSummary(summary);
+        StatusMessage = "Otonom üretim retry/devam için kuyruğa alındı.";
+        await NavigateToAutonomousWorkspaceAsync(summary);
     }
 
     private async Task CancelAutonomousAsync()
@@ -650,15 +693,6 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         if (AutonomousRunId is int runId)
         {
             await _autonomousRunService.RequestCancellationAsync(runId);
-            await LoadAutonomousRunSummaryAsync();
-        }
-    }
-
-    private async Task RetryAutonomousAsync()
-    {
-        if (AutonomousRunId is int runId)
-        {
-            await _autonomousRunService.RetryAsync(runId);
             await LoadAutonomousRunSummaryAsync();
         }
     }
@@ -965,4 +999,104 @@ public class CreateFilmProjectViewModel : ValidatableObservableObject
         var sceneText = summary.CurrentSceneNumber is int sceneNumber ? $" Sahne: {sceneNumber}." : string.Empty;
         AutonomousStatusText = $"{summary.Status} / {summary.CurrentStage}. İlerleme: {summary.OverallProgressPercentage:0.#}%.{sceneText} {summary.LastMessage}".Trim();
     }
+
+    private async Task NavigateToAutonomousWorkspaceAsync(AutonomousGenerationRunSummary summary)
+    {
+        var stage = ResolveStageFromSummary(summary);
+        if (stage is AutonomousGenerationStage.Pending or AutonomousGenerationStage.Validating or AutonomousGenerationStage.Failed)
+        {
+            var checkpoint = await _autonomousRunService.GetProjectCheckpointAsync(summary.FilmProjectId);
+            stage = ResolveStageFromCheckpoint(checkpoint);
+        }
+
+        if (IsStoryWorkspaceStage(stage))
+        {
+            await _navigationService.NavigateToStoryGenerationAsync(summary.FilmProjectId);
+            return;
+        }
+
+        var tabIndex = stage == AutonomousGenerationStage.GeneratingImages ? 0 : 1;
+        await _navigationService.NavigateToProductionAsync(summary.FilmProjectId, tabIndex);
+    }
+
+    private static AutonomousGenerationStage ResolveStageFromSummary(AutonomousGenerationRunSummary summary)
+    {
+        if (summary.CurrentStage != AutonomousGenerationStage.Pending)
+        {
+            return summary.CurrentStage;
+        }
+
+        return summary.Status switch
+        {
+            AutonomousGenerationRunStatus.GeneratingStory or
+            AutonomousGenerationRunStatus.GeneratingScenes or
+            AutonomousGenerationRunStatus.GeneratingStoryNarrative or
+            AutonomousGenerationRunStatus.GeneratingCharacters or
+            AutonomousGenerationRunStatus.GeneratingNarrativeScenes or
+            AutonomousGenerationRunStatus.GeneratingImagePrompts or
+            AutonomousGenerationRunStatus.GeneratingVideoPrompts => AutonomousGenerationStage.GeneratingVideoPrompts,
+            AutonomousGenerationRunStatus.GeneratingImages => AutonomousGenerationStage.GeneratingImages,
+            AutonomousGenerationRunStatus.GeneratingVideos => AutonomousGenerationStage.GeneratingVideos,
+            AutonomousGenerationRunStatus.GeneratingAudio => AutonomousGenerationStage.GeneratingAudio,
+            AutonomousGenerationRunStatus.Finalizing => AutonomousGenerationStage.Finalizing,
+            AutonomousGenerationRunStatus.Completed => AutonomousGenerationStage.Completed,
+            _ => summary.CurrentStage
+        };
+    }
+
+    private static AutonomousGenerationStage ResolveStageFromCheckpoint(AutonomousProjectCheckpoint checkpoint)
+    {
+        if (!checkpoint.HasValidStory)
+        {
+            return AutonomousGenerationStage.GeneratingStoryNarrative;
+        }
+
+        if (!checkpoint.HasValidCharacters)
+        {
+            return AutonomousGenerationStage.GeneratingCharacters;
+        }
+
+        if (checkpoint.FirstMissingNarrativeSceneNumber is not null)
+        {
+            return AutonomousGenerationStage.GeneratingNarrativeScenes;
+        }
+
+        if (checkpoint.FirstMissingImagePromptSceneNumber is not null)
+        {
+            return AutonomousGenerationStage.GeneratingImagePrompts;
+        }
+
+        if (checkpoint.FirstMissingVideoPromptSceneNumber is not null)
+        {
+            return AutonomousGenerationStage.GeneratingVideoPrompts;
+        }
+
+        if (checkpoint.FirstMissingSelectedImageSceneNumber is not null)
+        {
+            return AutonomousGenerationStage.GeneratingImages;
+        }
+
+        if (checkpoint.FirstMissingSelectedVideoSceneNumber is not null)
+        {
+            return AutonomousGenerationStage.GeneratingVideos;
+        }
+
+        if (checkpoint.FirstMissingSceneAudioSceneNumber is not null)
+        {
+            return AutonomousGenerationStage.GeneratingAudio;
+        }
+
+        return AutonomousGenerationStage.Completed;
+    }
+
+    private static bool IsStoryWorkspaceStage(AutonomousGenerationStage stage) =>
+        stage is AutonomousGenerationStage.Pending or
+            AutonomousGenerationStage.Validating or
+            AutonomousGenerationStage.GeneratingStory or
+            AutonomousGenerationStage.GeneratingScenes or
+            AutonomousGenerationStage.GeneratingStoryNarrative or
+            AutonomousGenerationStage.GeneratingCharacters or
+            AutonomousGenerationStage.GeneratingNarrativeScenes or
+            AutonomousGenerationStage.GeneratingImagePrompts or
+            AutonomousGenerationStage.GeneratingVideoPrompts;
 }

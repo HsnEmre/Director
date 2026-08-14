@@ -18,6 +18,20 @@ public sealed class StoryBibleResponse
     public List<StoryCharacterResponse> Characters { get; set; } = new();
 }
 
+public sealed class StoryNarrativeResponse
+{
+    public string Title { get; set; } = string.Empty;
+    public string Logline { get; set; } = string.Empty;
+    public string Synopsis { get; set; } = string.Empty;
+    public string OpeningSummary { get; set; } = string.Empty;
+    public string DevelopmentSummary { get; set; } = string.Empty;
+    public string ClimaxSummary { get; set; } = string.Empty;
+    public string EndingSummary { get; set; } = string.Empty;
+    public string WorldDescription { get; set; } = string.Empty;
+    public string VisualDirection { get; set; } = string.Empty;
+    public List<string> ContinuityRules { get; set; } = new();
+}
+
 public sealed class StoryCharacterResponse
 {
     public string CharacterKey { get; set; } = string.Empty;
@@ -29,6 +43,73 @@ public sealed class StoryCharacterResponse
     public string VoiceDescription { get; set; } = string.Empty;
     public string ContinuityDescription { get; set; } = string.Empty;
     public List<string> ForbiddenChanges { get; set; } = new();
+}
+
+public sealed class StoryCharactersResponse
+{
+    public List<StoryCharacterResponse> Characters { get; set; } = new();
+}
+
+public sealed class StoryCharacterCorrectionsResponse
+{
+    public List<StoryCharacterFieldCorrectionResponse> Corrections { get; set; } = new();
+}
+
+public sealed class StoryCharacterFieldCorrectionResponse
+{
+    public string CharacterKey { get; set; } = string.Empty;
+    public string Field { get; set; } = string.Empty;
+    public string Value { get; set; } = string.Empty;
+}
+
+public sealed class NarrativeSceneResponse
+{
+    [JsonRequired]
+    public int SceneNumber { get; set; }
+    [JsonRequired]
+    public int DurationSeconds { get; set; }
+    [JsonRequired]
+    public string Title { get; set; } = string.Empty;
+    [JsonRequired]
+    public string StoryBeat { get; set; } = string.Empty;
+    [JsonRequired]
+    public string SceneDescription { get; set; } = string.Empty;
+    [JsonRequired]
+    public string LocationDescription { get; set; } = string.Empty;
+    [JsonRequired]
+    public string TimeOfDay { get; set; } = string.Empty;
+    [JsonRequired]
+    public List<string> Characters { get; set; } = new();
+    [JsonRequired]
+    public string ContinuityFromPreviousScene { get; set; } = string.Empty;
+    [JsonRequired]
+    public string DialogueIntent { get; set; } = string.Empty;
+}
+
+public sealed class SceneImagePromptResponse
+{
+    [JsonRequired]
+    public int SceneNumber { get; set; }
+    [JsonRequired]
+    public string ImagePrompt { get; set; } = string.Empty;
+    [JsonRequired]
+    public string ImageNegativePrompt { get; set; } = string.Empty;
+}
+
+public sealed class SceneVideoPromptResponse
+{
+    [JsonRequired]
+    public int SceneNumber { get; set; }
+    [JsonRequired]
+    public string VideoPrompt { get; set; } = string.Empty;
+    [JsonRequired]
+    public string VideoNegativePrompt { get; set; } = string.Empty;
+    [JsonRequired]
+    public string StartState { get; set; } = string.Empty;
+    [JsonRequired]
+    public string MotionPlan { get; set; } = string.Empty;
+    [JsonRequired]
+    public string EndState { get; set; } = string.Empty;
 }
 
 public sealed class SceneOutlineBatchResponse

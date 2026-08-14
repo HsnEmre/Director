@@ -14,5 +14,10 @@ public enum AutonomousGenerationRunStatus
     Failed = 9,
     CancelRequested = 10,
     Cancelled = 11,
-    Paused = 12
+    Paused = 12,
+    GeneratingStoryNarrative = 13,
+    GeneratingCharacters = 14,
+    GeneratingNarrativeScenes = 15,
+    GeneratingImagePrompts = 16,
+    GeneratingVideoPrompts = 17
 }

@@ -65,9 +65,10 @@ public sealed class NavigationService : ObservableObject, INavigationService
         CurrentViewModel = viewModel;
     }
 
-    public async Task NavigateToProductionAsync(int projectId)
+    public async Task NavigateToProductionAsync(int projectId, int selectedTabIndex = 0)
     {
         var viewModel = _serviceProvider.GetRequiredService<ProductionWorkspaceViewModel>();
+        viewModel.SelectedWorkspaceTabIndex = selectedTabIndex;
         await viewModel.InitializeAsync(projectId);
         CurrentProjectId = projectId;
         CurrentStep = "Üretim";

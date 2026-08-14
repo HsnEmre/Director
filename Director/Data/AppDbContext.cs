@@ -363,7 +363,7 @@ public class AppDbContext : DbContext
             entity.HasIndex(run => run.FilmProjectId)
                 .IsUnique()
                 .HasDatabaseName("IX_AutonomousGenerationRuns_FilmProjectId_Active")
-                .HasFilter("[Status] IN (0, 1, 2, 3, 4, 5, 6, 7, 10, 12)");
+                .HasFilter("[Status] IN (0, 1, 2, 3, 4, 5, 6, 7, 10, 12, 13, 14, 15, 16, 17)");
 
             entity.HasOne(run => run.FilmProject)
                 .WithMany(project => project.AutonomousGenerationRuns)

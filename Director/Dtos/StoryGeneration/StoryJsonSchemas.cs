@@ -2,6 +2,112 @@ namespace Director.Dtos.StoryGeneration;
 
 public static class StoryJsonSchemas
 {
+    public static object StoryNarrativeSchema() => new
+    {
+        type = "object",
+        additionalProperties = false,
+        required = new[] { "title", "logline", "synopsis", "openingSummary", "developmentSummary", "climaxSummary", "endingSummary", "worldDescription", "visualDirection", "continuityRules" },
+        properties = new Dictionary<string, object>
+        {
+            ["title"] = StringSchema(),
+            ["logline"] = StringSchema(),
+            ["synopsis"] = StringSchema(),
+            ["openingSummary"] = StringSchema(),
+            ["developmentSummary"] = StringSchema(),
+            ["climaxSummary"] = StringSchema(),
+            ["endingSummary"] = StringSchema(),
+            ["worldDescription"] = StringSchema(),
+            ["visualDirection"] = StringSchema(),
+            ["continuityRules"] = StringArraySchema()
+        }
+    };
+
+    public static object StoryCharactersSchema() => new
+    {
+        type = "object",
+        additionalProperties = false,
+        required = new[] { "characters" },
+        properties = new Dictionary<string, object>
+        {
+            ["characters"] = CharacterArraySchema()
+        }
+    };
+
+    public static object StoryCharacterCorrectionsSchema() => new
+    {
+        type = "object",
+        additionalProperties = false,
+        required = new[] { "corrections" },
+        properties = new Dictionary<string, object>
+        {
+            ["corrections"] = new
+            {
+                type = "array",
+                items = new
+                {
+                    type = "object",
+                    additionalProperties = false,
+                    required = new[] { "characterKey", "field", "value" },
+                    properties = new Dictionary<string, object>
+                    {
+                        ["characterKey"] = StringSchema(80),
+                        ["field"] = StringSchema(80),
+                        ["value"] = StringSchema()
+                    }
+                }
+            }
+        }
+    };
+
+    public static object NarrativeSceneSchema() => new
+    {
+        type = "object",
+        additionalProperties = false,
+        required = new[] { "sceneNumber", "durationSeconds", "title", "storyBeat", "sceneDescription", "locationDescription", "timeOfDay", "characters", "continuityFromPreviousScene", "dialogueIntent" },
+        properties = new Dictionary<string, object>
+        {
+            ["sceneNumber"] = new { type = "integer" },
+            ["durationSeconds"] = new { type = "integer" },
+            ["title"] = StringSchema(),
+            ["storyBeat"] = StringSchema(),
+            ["sceneDescription"] = StringSchema(),
+            ["locationDescription"] = StringSchema(),
+            ["timeOfDay"] = StringSchema(),
+            ["characters"] = StringArraySchema(),
+            ["continuityFromPreviousScene"] = StringSchema(),
+            ["dialogueIntent"] = StringSchema()
+        }
+    };
+
+    public static object SceneImagePromptSchema() => new
+    {
+        type = "object",
+        additionalProperties = false,
+        required = new[] { "sceneNumber", "imagePrompt", "imageNegativePrompt" },
+        properties = new Dictionary<string, object>
+        {
+            ["sceneNumber"] = new { type = "integer" },
+            ["imagePrompt"] = StringSchema(),
+            ["imageNegativePrompt"] = StringSchema()
+        }
+    };
+
+    public static object SceneVideoPromptSchema() => new
+    {
+        type = "object",
+        additionalProperties = false,
+        required = new[] { "sceneNumber", "videoPrompt", "videoNegativePrompt", "startState", "motionPlan", "endState" },
+        properties = new Dictionary<string, object>
+        {
+            ["sceneNumber"] = new { type = "integer" },
+            ["videoPrompt"] = StringSchema(),
+            ["videoNegativePrompt"] = StringSchema(),
+            ["startState"] = StringSchema(),
+            ["motionPlan"] = StringSchema(),
+            ["endState"] = StringSchema()
+        }
+    };
+
     public static object StoryBibleSchema() => new
     {
         type = "object",
@@ -19,28 +125,7 @@ public static class StoryJsonSchemas
             ["worldDescription"] = StringSchema(),
             ["visualDirection"] = StringSchema(),
             ["continuityRules"] = StringArraySchema(),
-            ["characters"] = new
-            {
-                type = "array",
-                items = new
-                {
-                    type = "object",
-                    additionalProperties = false,
-                    required = new[] { "characterKey", "name", "role", "physicalDescription", "clothingDescription", "personalityDescription", "voiceDescription", "continuityDescription", "forbiddenChanges" },
-                    properties = new Dictionary<string, object>
-                    {
-                        ["characterKey"] = StringSchema(80, "Stable lowercase identifier such as metehan or commander_1."),
-                        ["name"] = StringSchema(160, "Character display name."),
-                        ["role"] = RoleSchema(),
-                        ["physicalDescription"] = StringSchema(null, "Appearance only: face, body, age, hair, eyes and other physical traits."),
-                        ["clothingDescription"] = StringSchema(null, "Clothing and equipment only: garments, armor, accessories, weapons and carried items."),
-                        ["personalityDescription"] = StringSchema(),
-                        ["voiceDescription"] = StringSchema(),
-                        ["continuityDescription"] = StringSchema(),
-                        ["forbiddenChanges"] = StringArraySchema()
-                    }
-                }
-            }
+            ["characters"] = CharacterArraySchema()
         }
     };
 
@@ -176,13 +261,36 @@ public static class StoryJsonSchemas
     private static object RoleSchema() => new
     {
         type = "string",
-        maxLength = 80,
-        description = "Short narrative function only. Examples: Protagonist, Ruler, Warrior Ally, Commander, Political Antagonist. Never include appearance, clothing, equipment, personality paragraph or scene description."
+        maxLength = 30,
+        description = "Short narrative function only. Examples: Protagonist, Ruler, Warrior Ally, Commander. Never include appearance, clothing, equipment, personality paragraph or scene description."
     };
 
     private static object StringArraySchema() => new
     {
         type = "array",
         items = new { type = "string" }
+    };
+
+    private static object CharacterArraySchema() => new
+    {
+        type = "array",
+        items = new
+        {
+            type = "object",
+            additionalProperties = false,
+            required = new[] { "characterKey", "name", "role", "physicalDescription", "clothingDescription", "personalityDescription", "voiceDescription", "continuityDescription", "forbiddenChanges" },
+            properties = new Dictionary<string, object>
+            {
+                ["characterKey"] = StringSchema(80, "Stable lowercase identifier such as metehan or commander_1."),
+                ["name"] = StringSchema(160, "Character display name."),
+                ["role"] = RoleSchema(),
+                ["physicalDescription"] = StringSchema(null, "Appearance only: face, body, age, hair, eyes and other physical traits."),
+                ["clothingDescription"] = StringSchema(null, "Clothing and equipment only: garments, armor, accessories, weapons and carried items."),
+                ["personalityDescription"] = StringSchema(),
+                ["voiceDescription"] = StringSchema(),
+                ["continuityDescription"] = StringSchema(),
+                ["forbiddenChanges"] = StringArraySchema()
+            }
+        }
     };
 }

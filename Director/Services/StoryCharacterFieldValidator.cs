@@ -30,7 +30,7 @@ public static class StoryCharacterFieldValidator
 {
     public const int CharacterKeyMaxLength = 80;
     public const int NameMaxLength = 160;
-    public const int RoleMaxLength = 80;
+    public const int RoleMaxLength = 30;
 
     private static readonly string[] AppearanceTerms =
     {

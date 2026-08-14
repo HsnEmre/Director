@@ -38,6 +38,21 @@ public sealed class StoryGenerationViewModelLeaseTests
 
     private sealed class BusyStoryGenerationService : IStoryGenerationService
     {
+        public Task<StoryGenerationProgressResult> GenerateStoryNarrativeAsync(int filmProjectId, IProgress<StoryGenerationProgress>? progress = null, CancellationToken cancellationToken = default) =>
+            GenerateStoryAsync(filmProjectId, progress, cancellationToken);
+
+        public Task<StoryGenerationProgressResult> GenerateStoryCharactersAsync(int filmProjectId, IProgress<StoryGenerationProgress>? progress = null, CancellationToken cancellationToken = default) =>
+            GenerateStoryAsync(filmProjectId, progress, cancellationToken);
+
+        public Task<StoryGenerationProgressResult> GenerateAllMissingNarrativeScenesAsync(int filmProjectId, IProgress<StoryGenerationProgress>? progress = null, CancellationToken cancellationToken = default) =>
+            GenerateStoryAsync(filmProjectId, progress, cancellationToken);
+
+        public Task<StoryGenerationProgressResult> GenerateAllMissingImagePromptsAsync(int filmProjectId, IProgress<StoryGenerationProgress>? progress = null, CancellationToken cancellationToken = default) =>
+            GenerateStoryAsync(filmProjectId, progress, cancellationToken);
+
+        public Task<StoryGenerationProgressResult> GenerateAllMissingVideoPromptsAsync(int filmProjectId, IProgress<StoryGenerationProgress>? progress = null, CancellationToken cancellationToken = default) =>
+            GenerateStoryAsync(filmProjectId, progress, cancellationToken);
+
         public Task<StoryGenerationProgressResult> GenerateStoryAsync(int filmProjectId, IProgress<StoryGenerationProgress>? progress = null, CancellationToken cancellationToken = default) =>
             Task.FromException<StoryGenerationProgressResult>(new ProjectGenerationAlreadyRunningException(filmProjectId, "test"));
 
@@ -67,6 +82,6 @@ public sealed class StoryGenerationViewModelLeaseTests
         public Task NavigateToProjectSetupAsync(int? projectId = null) => Task.CompletedTask;
         public Task NavigateToStoryGenerationAsync(int projectId) => Task.CompletedTask;
         public Task NavigateToProjectHistoryAsync() => Task.CompletedTask;
-        public Task NavigateToProductionAsync(int projectId) => Task.CompletedTask;
+        public Task NavigateToProductionAsync(int projectId, int selectedTabIndex = 0) => Task.CompletedTask;
     }
 }

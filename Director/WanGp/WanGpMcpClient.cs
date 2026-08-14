@@ -232,6 +232,8 @@ public sealed class WanGpMcpClient : IWanGpClient
             source["negative_prompt"] = request.NegativePrompt;
         }
 
+        AddImageReferenceIfSupported(source, schema, request);
+
         foreach (var setting in schema.DefaultSettings)
         {
             source.TryAdd(setting.Key, setting.Value?.Deserialize<object>(JsonOptions));
@@ -250,6 +252,52 @@ public sealed class WanGpMcpClient : IWanGpClient
             ExternalJobId = ReadString(obj, "job_id", "jobId", "id"),
             RawResponse = obj
         };
+    }
+
+    private static void AddImageReferenceIfSupported(
+        Dictionary<string, object?> source,
+        WanGpModelSchema schema,
+        WanGpImageGenerationRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.SourceImagePath))
+        {
+            return;
+        }
+
+        var imageKey = ResolveImageReferenceKey(schema);
+        if (string.IsNullOrWhiteSpace(imageKey))
+        {
+            throw new InvalidOperationException(
+                $"Selected image model does not expose a reference/source image input in its WanGP schema. Model={request.ModelType}; sourceAssetId={request.SourceImageAssetId}.");
+        }
+
+        source[imageKey] = Path.GetFullPath(request.SourceImagePath);
+    }
+
+    private static string ResolveImageReferenceKey(WanGpModelSchema schema)
+    {
+        var schemaKey = WanGpVideoInputContractResolver.FindPropertyName(
+            schema.RawSchema,
+            "image_reference",
+            "reference_image",
+            "ref_image",
+            "source_image",
+            "input_image",
+            "init_image",
+            "image");
+        if (!string.IsNullOrWhiteSpace(schemaKey))
+        {
+            return schemaKey;
+        }
+
+        return schema.DefaultSettings.Select(pair => pair.Key).FirstOrDefault(key =>
+            key.Equals("image_reference", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("reference_image", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("ref_image", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("source_image", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("input_image", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("init_image", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("image", StringComparison.OrdinalIgnoreCase)) ?? string.Empty;
     }
 
     public async Task<WanGpGenerationSubmission> SubmitVideoGenerationAsync(
@@ -316,7 +364,7 @@ public sealed class WanGpMcpClient : IWanGpClient
     {
         var transport = new HttpClientTransport(new HttpClientTransportOptions
         {
-            Endpoint = new Uri(_options.Endpoint),
+            Endpoint = _options.GetEffectiveMcpEndpoint(),
             Name = "WanGP",
             TransportMode = HttpTransportMode.StreamableHttp,
             ConnectionTimeout = TimeSpan.FromSeconds(15)

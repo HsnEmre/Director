@@ -23,6 +23,11 @@ public sealed class AutonomousGenerationRunSummary
     public bool IsActive => Status is
         AutonomousGenerationRunStatus.Pending or
         AutonomousGenerationRunStatus.Validating or
+        AutonomousGenerationRunStatus.GeneratingStoryNarrative or
+        AutonomousGenerationRunStatus.GeneratingCharacters or
+        AutonomousGenerationRunStatus.GeneratingNarrativeScenes or
+        AutonomousGenerationRunStatus.GeneratingImagePrompts or
+        AutonomousGenerationRunStatus.GeneratingVideoPrompts or
         AutonomousGenerationRunStatus.GeneratingStory or
         AutonomousGenerationRunStatus.GeneratingScenes or
         AutonomousGenerationRunStatus.GeneratingImages or

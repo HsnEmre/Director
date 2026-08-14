@@ -85,8 +85,17 @@ public sealed class ImageGenerationService : IImageGenerationService
                 InferenceSteps = request.InferenceSteps <= 0 ? Math.Max(1, schema.DefaultInferenceSteps) : request.InferenceSteps,
                 Seed = request.Seed,
                 RandomSeed = request.RandomSeed,
-                StopOnError = request.StopOnError
+                StopOnError = request.StopOnError,
+                AutoSelectOutput = request.AutoSelectOutput,
+                SourceImageAssetId = request.SourceImageAssetId,
+                SourceImagePath = request.SourceImagePath
             };
+
+            if (!string.IsNullOrWhiteSpace(effectiveRequest.SourceImagePath) &&
+                (!File.Exists(effectiveRequest.SourceImagePath) || new FileInfo(effectiveRequest.SourceImagePath).Length == 0))
+            {
+                throw new FileNotFoundException("Image reference source file was not found or is empty.", effectiveRequest.SourceImagePath);
+            }
 
             WanGpJobSnapshot snapshot;
             await using (var gpuLease = await _gpuCoordinator.AcquireAsync(
@@ -174,7 +183,13 @@ public sealed class ImageGenerationService : IImageGenerationService
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            var savedAsset = await SaveCompletedAssetAsync(scene.Id, job.Id, outputResult.Candidates, snapshot.Seed, cancellationToken);
+            var savedAsset = await SaveCompletedAssetAsync(
+                scene.Id,
+                job.Id,
+                outputResult.Candidates,
+                snapshot.Seed,
+                cancellationToken,
+                forceSelected: effectiveRequest.AutoSelectOutput ? true : null);
             _activityCenter.AddLog("Dosya", "Gorsel Director proje klasorune kopyalandi.", GenerationLogLevel.Success);
             progress?.Report(new MediaGenerationProgress
             {

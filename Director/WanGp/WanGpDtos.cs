@@ -65,6 +65,21 @@ public sealed class WanGpMcpTransportException : InvalidOperationException
     }
 }
 
+public sealed class WanGpToolExecutionException : InvalidOperationException
+{
+    public WanGpToolExecutionException(string toolName, string detail)
+        : base(string.IsNullOrWhiteSpace(detail)
+            ? $"WanGP MCP tool failed: {toolName}"
+            : $"WanGP MCP tool failed: {toolName}. Detail: {detail}")
+    {
+        ToolName = toolName;
+        Detail = detail;
+    }
+
+    public string ToolName { get; }
+    public string Detail { get; }
+}
+
 public sealed class WanGpJobSnapshot
 {
     public string ExternalJobId { get; set; } = string.Empty;
@@ -90,6 +105,9 @@ public sealed class WanGpImageGenerationRequest
     public int? Seed { get; set; }
     public bool RandomSeed { get; set; }
     public bool StopOnError { get; set; }
+    public bool AutoSelectOutput { get; set; }
+    public int? SourceImageAssetId { get; set; }
+    public string SourceImagePath { get; set; } = string.Empty;
 }
 
 public sealed class WanGpVideoGenerationRequest

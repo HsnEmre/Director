@@ -176,12 +176,60 @@ public sealed class WanGpStableMcpClient : IWanGpClient, IAsyncDisposable
             source["negative_prompt"] = request.NegativePrompt;
         }
 
+        AddImageReferenceIfSupported(source, schema, request);
+
         foreach (var setting in schema.DefaultSettings)
         {
             source.TryAdd(setting.Key, setting.Value?.Deserialize<object>(JsonOptions));
         }
 
         return await SubmitGenerationAsync(source, "image", cancellationToken);
+    }
+
+    private static void AddImageReferenceIfSupported(
+        Dictionary<string, object?> source,
+        WanGpModelSchema schema,
+        WanGpImageGenerationRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.SourceImagePath))
+        {
+            return;
+        }
+
+        var imageKey = ResolveImageReferenceKey(schema);
+        if (string.IsNullOrWhiteSpace(imageKey))
+        {
+            throw new InvalidOperationException(
+                $"Selected image model does not expose a reference/source image input in its WanGP schema. Model={request.ModelType}; sourceAssetId={request.SourceImageAssetId}.");
+        }
+
+        source[imageKey] = Path.GetFullPath(request.SourceImagePath);
+    }
+
+    private static string ResolveImageReferenceKey(WanGpModelSchema schema)
+    {
+        var schemaKey = WanGpVideoInputContractResolver.FindPropertyName(
+            schema.RawSchema,
+            "image_reference",
+            "reference_image",
+            "ref_image",
+            "source_image",
+            "input_image",
+            "init_image",
+            "image");
+        if (!string.IsNullOrWhiteSpace(schemaKey))
+        {
+            return schemaKey;
+        }
+
+        return schema.DefaultSettings.Select(pair => pair.Key).FirstOrDefault(key =>
+            key.Equals("image_reference", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("reference_image", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("ref_image", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("source_image", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("input_image", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("init_image", StringComparison.OrdinalIgnoreCase) ||
+            key.Equals("image", StringComparison.OrdinalIgnoreCase)) ?? string.Empty;
     }
 
     public Task<WanGpGenerationSubmission> SubmitVideoGenerationAsync(
@@ -320,7 +368,7 @@ public sealed class WanGpStableMcpClient : IWanGpClient, IAsyncDisposable
                 return existing;
             }
 
-            var endpoint = CanonicalizeEndpoint(_options.Endpoint);
+            var endpoint = CanonicalizeEndpoint(_options.GetEffectiveMcpEndpointText());
             var client = await _sessionFactory(endpoint, cancellationToken);
             try
             {
@@ -779,7 +827,7 @@ public sealed class WanGpStableMcpClient : IWanGpClient, IAsyncDisposable
             var result = await client.CallToolAsync(toolName, args!, cancellationToken: cancellationToken);
             if (result.IsError == true)
             {
-                throw new InvalidOperationException($"WanGP MCP tool failed: {toolName}");
+                throw new WanGpToolExecutionException(toolName, FormatToolError(result));
             }
 
             if (result.StructuredContent is not null)
@@ -791,6 +839,25 @@ public sealed class WanGpStableMcpClient : IWanGpClient, IAsyncDisposable
         }
 
         public ValueTask DisposeAsync() => client.DisposeAsync();
+
+        private static string FormatToolError(object result)
+        {
+            try
+            {
+                var node = JsonSerializer.SerializeToNode(result, JsonOptions);
+                var detail = node?.ToJsonString(JsonOptions) ?? string.Empty;
+                if (detail.Length > 2000)
+                {
+                    detail = detail[..2000] + "...";
+                }
+
+                return detail;
+            }
+            catch
+            {
+                return result.ToString() ?? string.Empty;
+            }
+        }
     }
 }
 
